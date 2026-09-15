@@ -1,0 +1,311 @@
+// Orchestration : portage de genere(). La source de donnees est injectee, ce
+// qui permet aux tests de faire tourner l'algorithme complet sur un reseau
+// fabrique, sans reseau ni Overpass.
+
+import { distanceHaversine } from "./geo.js";
+import { noeudsInfranchissables, LIBELLES_QUALITE } from "./regles.js";
+import {
+  construitGrapheBrut, contracte, supprimeImpasses, composante, restreint,
+  construitCSR, IndexSpatial,
+} from "./graphe.js";
+import { Routeur } from "./routage.js";
+import {
+  chercheBoucle, affineBoucle, chercheTrajet, affineTrajet,
+  polyligneDuTrajet, viragesSerres, compareNote,
+} from "./boucle.js";
+import { repartition, allege } from "./sortie.js";
+
+export class DonneesIndisponibles extends Error {}
+export class BoucleIntrouvable extends Error {}
+
+const km = (m) => (m / 1000).toFixed(2);
+
+export async function genere({
+  lat, lon, cibleM, niveau = "normal", caps = 16, sommets = [3, 4, 5, 6],
+  iterations = 10, tolerance = 0.03, repetitionMax = 0.12, maxPoints = 3000,
+  arrivee = null, rafraichir = false, journal = () => {}, source,
+}) {
+  // 1. reseau OSM ---------------------------------------------------------
+  let rayon = cibleM * 0.40 + 800;
+  let centreLat = lat, centreLon = lon;
+  if (arrivee) {
+    centreLat = (lat + arrivee[0]) / 2.0;
+    centreLon = (lon + arrivee[1]) / 2.0;
+    rayon += distanceHaversine(lat, lon, arrivee[0], arrivee[1]) / 2.0;
+  }
+  rayon = Math.min(rayon, 25000);
+  journal(`1/5 Reseau OpenStreetMap dans un rayon de ${rayon.toFixed(0)} m`);
+  if (rayon > 8000) {
+    journal("  zone etendue : compter un peu de patience la premiere fois, "
+          + "puis c'est en cache");
+  }
+
+  const [voies, balisesRes, barrieresRes] = await Promise.all([
+    source.reseau(centreLat, centreLon, rayon, rafraichir, journal),
+    source.itineraires(centreLat, centreLon, rayon, rafraichir, journal)
+      .catch((e) => e),
+    source.barrieres(centreLat, centreLon, rayon, rafraichir, journal)
+      .catch((e) => e),
+  ]);
+
+  const bloques = barrieresRes instanceof Error
+    ? new Set() : noeudsInfranchissables(barrieresRes);
+  if (bloques.size) {
+    journal(`  ${bloques.size} obstacles infranchissables releves (portails, clotures)`);
+  }
+  let balises;
+  if (balisesRes instanceof Error) {
+    journal("  itineraires balises indisponibles : les chemins non documentes "
+          + "seront ecartes");
+    balises = new Set();
+  } else {
+    balises = balisesRes;
+    journal(`  ${balises.size} voies appartiennent a un itineraire pedestre balise`);
+  }
+
+  // 2. filtrage de praticabilite ------------------------------------------
+  journal("2/5 Filtrage de praticabilite");
+  const G = construitGrapheBrut(voies, niveau, balises, bloques);
+  const { brut, nbNoeuds, lat: latN, lon: lonN } = G;
+  journal(`  ${G.retenues} voies sur ${voies.length} retenues comme praticables `
+        + `(${voies.length - G.retenues} ecartees comme impraticables ou interdites)`);
+  if (G.nbAvecAretes < 50) {
+    throw new BoucleIntrouvable(
+      "Trop peu de voies praticables autour de ce point. Essayer le niveau "
+      + "tolerant, ou un depart plus proche d'une zone habitee.");
+  }
+
+  const avecAretes = [];
+  for (let n = 0; n < nbNoeuds; n++) if (brut[n]) avecAretes.push(n);
+  const indexComplet = new IndexSpatial(latN, lonN, avecAretes);
+  const [departBrut, ecartDepart] = indexComplet.plusProche(lat, lon);
+  if (departBrut === null) {
+    throw new BoucleIntrouvable(
+      "Aucun chemin praticable a proximite du point de depart choisi.");
+  }
+  journal(`  depart accroche a ${ecartDepart.toFixed(0)} m du point demande`);
+
+  let arriveeBrut = null, ecartArrivee = 0.0;
+  if (arrivee) {
+    [arriveeBrut, ecartArrivee] = indexComplet.plusProche(arrivee[0], arrivee[1]);
+    if (arriveeBrut === null) {
+      throw new BoucleIntrouvable("Aucun chemin praticable a proximite du point d'arrivee.");
+    }
+  }
+
+  // 3. suppression des impasses -------------------------------------------
+  journal("3/5 Suppression des impasses (aucun demi-tour possible ensuite)");
+  const proteges = new Set([departBrut]);
+  if (arriveeBrut !== null) proteges.add(arriveeBrut);
+  const { aretes, adjacence } = contracte(brut, nbNoeuds, proteges);
+  let coeur = supprimeImpasses(aretes, adjacence, nbNoeuds);
+  let nbCoeur = 0;
+  for (let n = 0; n < nbNoeuds; n++) if (coeur[n]) nbCoeur += coeur[n].length;
+  journal(`  ${aretes.length} aretes, ${Math.floor(nbCoeur / 2)} apres elagage `
+        + "des culs-de-sac");
+
+  const routeur = new Routeur(construitCSR(adjacence, nbNoeuds), aretes,
+                              latN, lonN, nbNoeuds);
+
+  let depart, amorce = [], longueurAmorce = 0.0;
+  if (coeur[departBrut]) {
+    depart = departBrut;
+  } else {
+    // Le depart est sur une voie sans issue : on rejoint le premier point du
+    // reseau maille, et cette amorce est le seul aller-retour inevitable.
+    const [noeud, trajet] = routeur.rejointCoeur(adjacence, departBrut, (n) => Boolean(coeur[n]));
+    if (noeud === null) throw new BoucleIntrouvable("Depart isole du reseau praticable.");
+    depart = noeud; amorce = trajet;
+    longueurAmorce = routeur.longueurTrajet(amorce);
+    journal(`  amorce depuis l'impasse du depart : ${longueurAmorce.toFixed(0)} m `
+          + "(seul aller-retour inevitable)");
+  }
+
+  let noeudArrivee = depart, amorceArrivee = [], longueurAmorceArrivee = 0.0;
+  if (arrivee) {
+    if (coeur[arriveeBrut]) {
+      noeudArrivee = arriveeBrut;
+    } else {
+      const [noeud, trajet] = routeur.rejointCoeur(adjacence, arriveeBrut, (n) => Boolean(coeur[n]));
+      if (noeud === null) throw new BoucleIntrouvable("Arrivee isolee du reseau praticable.");
+      noeudArrivee = noeud; amorceArrivee = trajet;
+      longueurAmorceArrivee = routeur.longueurTrajet(amorceArrivee);
+    }
+    journal(`  arrivee accrochee a ${ecartArrivee.toFixed(0)} m du point demande`);
+  }
+
+  const atteignables = composante(coeur, depart);
+  coeur = restreint(coeur, atteignables, nbNoeuds);
+  if (atteignables.size < 20) {
+    throw new BoucleIntrouvable("Reseau maille trop petit autour du depart.");
+  }
+  if (arrivee && !coeur[noeudArrivee]) {
+    throw new BoucleIntrouvable(
+      "Aucun itineraire praticable ne relie le depart a l'arrivee. Verifier les "
+      + "deux points, ou assouplir le niveau d'exigence.");
+  }
+  const indexCoeur = new IndexSpatial(latN, lonN, atteignables);
+  const routeurCoeur = new Routeur(construitCSR(coeur, nbNoeuds), aretes,
+                                   latN, lonN, nbNoeuds);
+
+  // 4. recherche -----------------------------------------------------------
+  if (arrivee) {
+    return traceVersArrivee({
+      routeur: routeurCoeur, aretes, latN, lonN, indexCoeur, depart, noeudArrivee,
+      departLL: [lat, lon], arriveeLL: arrivee, cibleM, amorce, amorceArrivee,
+      longueurAmorce, longueurAmorceArrivee, iterations, tolerance,
+      repetitionMax, maxPoints, ecartDepart, journal,
+    });
+  }
+
+  const budget = Math.max(cibleM - 2 * longueurAmorce, cibleM * 0.3);
+  journal(`4/5 Recherche de la boucle (${caps} orientations x ${sommets.length} formes)`);
+  let meilleur = null;
+
+  for (let indexCap = 0; indexCap < caps; indexCap++) {
+    const cap = indexCap * 360.0 / caps;
+    let ligne = `  cap ${String(Math.round(cap)).padStart(3)} deg :`;
+    for (const nbSommets of sommets) {
+      const essai = chercheBoucle(routeurCoeur, aretes, latN, lonN, indexCoeur,
+                                  depart, lat, lon, budget, cap, nbSommets,
+                                  iterations, tolerance);
+      if (essai === null) { ligne += `  ${nbSommets}s: -`; continue; }
+      const [note, longueur, repetee] = essai;
+      const part = longueur ? repetee / longueur : 1.0;
+      ligne += `  ${nbSommets}s: ${km(longueur + 2 * longueurAmorce)}km/`
+             + `${(part * 100).toFixed(0)}%`;
+      if (part > repetitionMax) continue;
+      if (meilleur === null || compareNote(note, meilleur[0]) < 0) meilleur = essai;
+    }
+    journal(ligne);
+    if (indexCap % 4 === 3) await souffle();
+  }
+
+  if (meilleur === null) {
+    throw new BoucleIntrouvable(
+      "Aucune boucle sans aller-retour trouvee pour cette distance. Essayer une "
+      + "distance un peu differente, un autre depart, ou un niveau d'exigence "
+      + "moins severe.");
+  }
+
+  const avant = meilleur;
+  meilleur = affineBoucle(routeurCoeur, aretes, latN, lonN, indexCoeur, depart,
+                          lat, lon, budget, tolerance, repetitionMax, meilleur);
+  if (meilleur !== avant) {
+    journal(`  affinage : ${km(avant[1] + 2 * longueurAmorce)} km -> `
+          + `${km(meilleur[1] + 2 * longueurAmorce)} km, repetition `
+          + `${avant[2].toFixed(0)} -> ${meilleur[2].toFixed(0)} m, crochets `
+          + `${avant[0][3].toFixed(2)} -> ${meilleur[0][3].toFixed(2)} par km`);
+  }
+
+  const [, longueur, repetee, trajet, nbSommets, cap] = meilleur;
+
+  // 5. assemblage du trace -------------------------------------------------
+  let noeuds = [];
+  if (amorce.length) noeuds = polyligneDuTrajet(amorce, aretes);
+  const boucle = polyligneDuTrajet(trajet, aretes);
+  if (noeuds.length && boucle.length && noeuds[noeuds.length - 1] === boucle[0]) {
+    noeuds.push(...boucle.slice(1));
+  } else {
+    noeuds.push(...boucle);
+  }
+  if (amorce.length) {
+    const retour = polyligneDuTrajet(amorce, aretes).reverse();
+    noeuds.push(...(noeuds[noeuds.length - 1] === retour[0] ? retour.slice(1) : retour));
+  }
+
+  const points = allege(noeuds.map((n) => [latN[n], lonN[n]]), maxPoints);
+  const distance = longueur + 2 * longueurAmorce;
+  journal(`5/5 Trace retenu : ${km(distance)} km, ${repetee.toFixed(0)} m parcourus deux fois`);
+
+  return {
+    points, distance, cible: cibleM, repetee,
+    partRepetee: longueur ? repetee / longueur : 0.0,
+    amorce: longueurAmorce, sommets: nbSommets, cap, accroche: ecartDepart,
+    types: repartition(trajet, aretes, "etiquette"),
+    qualites: repartition(trajet, aretes, "qualite")
+      .map(([q, m]) => [LIBELLES_QUALITE[q] || q, m]),
+    longueurBoucle: longueur, boucle: true,
+  };
+}
+
+function traceVersArrivee({
+  routeur, aretes, latN, lonN, indexCoeur, depart, noeudArrivee, departLL,
+  arriveeLL, cibleM, amorce, amorceArrivee, longueurAmorce,
+  longueurAmorceArrivee, iterations, tolerance, repetitionMax, maxPoints,
+  ecartDepart, journal,
+}) {
+  const budget = cibleM - longueurAmorce - longueurAmorceArrivee;
+
+  routeur.nouvellesPenalites();
+  const direct = routeur.plusCourtChemin(depart, noeudArrivee);
+  if (direct === null) {
+    throw new BoucleIntrouvable("Aucun itineraire praticable ne relie le depart a l'arrivee.");
+  }
+  const minimum = routeur.longueurTrajet(direct[1]);
+  const totalMinimum = minimum + longueurAmorce + longueurAmorceArrivee;
+  if (budget < minimum * 0.98) {
+    throw new BoucleIntrouvable(
+      `Distance trop courte : le plus court chemin praticable entre ces deux `
+      + `points fait deja ${km(totalMinimum)} km.`);
+  }
+
+  journal(`4/5 Recherche du parcours (plus court chemin : ${km(totalMinimum)} km)`);
+  let meilleur = null;
+  for (const nombre of [1, 2, 3, 4]) {
+    let ligne = `  ${nombre} point(s) de passage :`;
+    for (const [cote, libelle] of [[1.0, "gauche"], [-1.0, "droite"]]) {
+      const essai = chercheTrajet(routeur, aretes, latN, lonN, indexCoeur, depart,
+                                  noeudArrivee, departLL, arriveeLL, budget,
+                                  nombre, cote, iterations, tolerance);
+      if (essai === null) { ligne += `  ${libelle} : -`; continue; }
+      const [note, longueur, repetee] = essai;
+      const part = longueur ? repetee / longueur : 1.0;
+      ligne += `  ${libelle} : ${km(longueur + longueurAmorce + longueurAmorceArrivee)}`
+             + ` km / ${(part * 100).toFixed(0)} %`;
+      if (part > repetitionMax) continue;
+      if (meilleur === null || compareNote(note, meilleur[0]) < 0) meilleur = essai;
+    }
+    journal(ligne);
+  }
+
+  if (meilleur === null) {
+    throw new BoucleIntrouvable(
+      "Aucun parcours sans aller-retour trouve pour cette distance entre ces "
+      + "deux points. Essayer une distance differente.");
+  }
+
+  meilleur = affineTrajet(routeur, aretes, latN, lonN, indexCoeur, depart,
+                          noeudArrivee, departLL, arriveeLL, budget, tolerance,
+                          repetitionMax, meilleur);
+
+  const [, longueur, repetee, trajet, nombre] = meilleur;
+
+  let noeuds = amorce.length ? polyligneDuTrajet(amorce, aretes) : [];
+  const coeurTrace = polyligneDuTrajet(trajet, aretes);
+  noeuds.push(...(noeuds.length && noeuds[noeuds.length - 1] === coeurTrace[0]
+                  ? coeurTrace.slice(1) : coeurTrace));
+  if (amorceArrivee.length) {
+    const fin = polyligneDuTrajet(amorceArrivee, aretes).reverse();
+    noeuds.push(...(noeuds[noeuds.length - 1] === fin[0] ? fin.slice(1) : fin));
+  }
+
+  const points = allege(noeuds.map((n) => [latN[n], lonN[n]]), maxPoints);
+  const distance = longueur + longueurAmorce + longueurAmorceArrivee;
+  journal(`5/5 Parcours retenu : ${km(distance)} km, ${repetee.toFixed(0)} m parcourus deux fois`);
+
+  return {
+    points, distance, cible: cibleM, repetee,
+    partRepetee: longueur ? repetee / longueur : 0.0,
+    amorce: longueurAmorce + longueurAmorceArrivee,
+    sommets: nombre, cap: 0.0, accroche: ecartDepart,
+    types: repartition(trajet, aretes, "etiquette"),
+    qualites: repartition(trajet, aretes, "qualite")
+      .map(([q, m]) => [LIBELLES_QUALITE[q] || q, m]),
+    longueurBoucle: longueur, boucle: false,
+  };
+}
+
+// Rend la main au fil d'execution pour que les messages d'avancement
+// parviennent a l'interface pendant le calcul.
+const souffle = () => new Promise((r) => setTimeout(r, 0));

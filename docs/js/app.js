@@ -1,0 +1,357 @@
+// Interface. Le calcul est delegue au worker : la carte reste manipulable
+// pendant la generation.
+
+import { chercheAdresse } from "./overpass.js";
+
+const $ = (id) => document.getElementById(id);
+const bouton = $("btn-generer");
+const journal = $("journal");
+const barre = $("barre");
+const bilan = $("bilan");
+const message = $("message");
+const champKm = $("km");
+const curseur = $("curseur");
+const champNiveau = $("niveau");
+
+// Le dernier depart, la derniere distance et le dernier niveau sont retenus
+// par le navigateur, sur ce poste uniquement. Ce sont des reglages que
+// l'utilisateur a lui-meme choisis : rien n'est transmis, rien n'est trace.
+const MEMOIRE = "generateur-boucle:reglages";
+function litMemoire() {
+  try { return JSON.parse(localStorage.getItem(MEMOIRE) || "null") || {}; }
+  catch (e) { return {}; }
+}
+function ecritMemoire(modifs) {
+  try {
+    localStorage.setItem(MEMOIRE, JSON.stringify(Object.assign(litMemoire(), modifs)));
+  } catch (e) { /* navigation privee : on s'en passe */ }
+}
+const memoire = litMemoire();
+const departConnu = typeof memoire.lat === "number" && typeof memoire.lon === "number";
+
+// --- fonds de carte -------------------------------------------------------
+// Uniquement des fonds OpenStreetMap : la couche satellite d'un fournisseur
+// commercial a ete retiree faute de licence pour une diffusion publique.
+const communs = { keepBuffer: 1, updateWhenZooming: false, maxZoom: 21 };
+const fonds = {
+  "Plan": L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    Object.assign({ maxNativeZoom: 19,
+      attribution: '&copy; les contributeurs <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' }, communs)),
+  "Plan détaillé (plus lent)": L.tileLayer(
+    "https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png",
+    Object.assign({ maxNativeZoom: 20, subdomains: "abc",
+      attribution: '&copy; OpenStreetMap France' }, communs)),
+  "Relief": L.tileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+    Object.assign({ maxNativeZoom: 17, subdomains: "abc",
+      attribution: '&copy; OpenTopoMap (CC-BY-SA), &copy; OpenStreetMap' }, communs)),
+};
+
+const carte = L.map("carte", {
+  center: departConnu ? [memoire.lat, memoire.lon] : [46.7, 2.4],
+  zoom: departConnu ? (memoire.zoom || 16) : 5,
+  layers: [fonds["Plan"]],
+  preferCanvas: true,
+});
+L.control.layers(fonds, {}, { position: "topright" }).addTo(carte);
+L.control.scale({ imperial: false, position: "bottomleft" }).addTo(carte);
+
+// --- points de depart et d'arrivee ---------------------------------------
+const jetonDepart = $("jeton-depart");
+const jetonArrivee = $("jeton-arrivee");
+const caseArrivee = $("case-arrivee");
+const blocArrivee = $("bloc-arrivee");
+
+let marqueur = null, marqueurArrivee = null, trace = null;
+let aPoser = "depart";
+// Declare ici et pas plus bas : majCoord le lit des la pose du depart memorise,
+// donc avant que le worker ne soit cree.
+let enCours = false;
+
+function icone(lettre, couleur) {
+  return L.divIcon({
+    className: "",
+    html: `<div style="width:26px;height:26px;border-radius:50%;background:${couleur};`
+        + `color:#fff;font:700 13px/24px system-ui,sans-serif;text-align:center;`
+        + `border:2px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,.45)">${lettre}</div>`,
+    iconSize: [26, 26], iconAnchor: [13, 13],
+  });
+}
+
+function majJetons() {
+  jetonDepart.classList.toggle("actif", aPoser === "depart");
+  jetonArrivee.classList.toggle("actif", aPoser === "arrivee");
+}
+
+function majCoord(enregistre) {
+  const d = marqueur && marqueur.getLatLng();
+  const a = marqueurArrivee && marqueurArrivee.getLatLng();
+  $("lat").textContent = d ? d.lat.toFixed(6) : "--";
+  $("lon").textContent = d ? d.lng.toFixed(6) : "--";
+  $("lat2").textContent = a ? a.lat.toFixed(6) : "--";
+  $("lon2").textContent = a ? a.lng.toFixed(6) : "--";
+
+  const manqueArrivee = caseArrivee.checked && !a;
+  $("precision").textContent = !d
+    ? "Clique sur la carte pour poser le départ."
+    : manqueArrivee ? "Clique sur la carte pour poser l'arrivée."
+    : (carte.getZoom() >= 17 ? "" : "Zoome pour affiner la position.");
+  bouton.disabled = !d || manqueArrivee || enCours;
+
+  if (enregistre) {
+    ecritMemoire({
+      lat: d ? d.lat : null, lon: d ? d.lng : null, zoom: carte.getZoom(),
+      arrivee: a ? { lat: a.lat, lon: a.lng } : null,
+      arriveeActive: caseArrivee.checked,
+    });
+  }
+}
+
+function poseDepart(latlng, recentre) {
+  if (marqueur) marqueur.setLatLng(latlng);
+  else {
+    marqueur = L.marker(latlng, { draggable: true, autoPan: true,
+                                  icon: icone("D", "#1f7a3d"), title: "Départ" })
+                .addTo(carte);
+    marqueur.on("drag move", () => majCoord(true));
+  }
+  if (recentre) carte.setView(latlng, Math.max(carte.getZoom(), 17));
+  majCoord(true);
+}
+
+function poseArrivee(latlng, recentre) {
+  if (marqueurArrivee) marqueurArrivee.setLatLng(latlng);
+  else {
+    marqueurArrivee = L.marker(latlng, { draggable: true, autoPan: true,
+                                         icon: icone("A", "#b42318"),
+                                         title: "Arrivée" }).addTo(carte);
+    marqueurArrivee.on("drag move", () => majCoord(true));
+  }
+  if (recentre) carte.setView(latlng, Math.max(carte.getZoom(), 17));
+  majCoord(true);
+}
+
+function pose(latlng, recentre) {
+  if (aPoser === "arrivee" && caseArrivee.checked) poseArrivee(latlng, recentre);
+  else poseDepart(latlng, recentre);
+  if (caseArrivee.checked && !marqueurArrivee) aPoser = "arrivee";
+  majJetons();
+}
+
+jetonDepart.onclick = () => { aPoser = "depart"; majJetons(); };
+jetonArrivee.onclick = () => { aPoser = "arrivee"; majJetons(); };
+
+caseArrivee.addEventListener("change", () => {
+  blocArrivee.hidden = !caseArrivee.checked;
+  if (!caseArrivee.checked) {
+    if (marqueurArrivee) { carte.removeLayer(marqueurArrivee); marqueurArrivee = null; }
+    aPoser = "depart";
+  } else if (!marqueurArrivee) {
+    aPoser = "arrivee";
+  }
+  majJetons();
+  majCoord(true);
+});
+
+if (memoire.arriveeActive) { caseArrivee.checked = true; blocArrivee.hidden = false; }
+if (departConnu) poseDepart(L.latLng(memoire.lat, memoire.lon), false);
+if (caseArrivee.checked && memoire.arrivee) {
+  poseArrivee(L.latLng(memoire.arrivee.lat, memoire.arrivee.lon), false);
+}
+aPoser = (caseArrivee.checked && !marqueurArrivee) ? "arrivee" : "depart";
+majJetons();
+
+carte.on("click", (e) => pose(e.latlng, false));
+carte.on("zoomend", () => majCoord(false));
+
+$("btn-position").onclick = () => {
+  if (!navigator.geolocation) return afficheErreur("Géolocalisation indisponible.");
+  navigator.geolocation.getCurrentPosition(
+    (pos) => pose(L.latLng(pos.coords.latitude, pos.coords.longitude), true),
+    () => afficheErreur("Position indisponible (autorisation refusée ?)."),
+    { enableHighAccuracy: true });
+};
+
+// --- recherche d'adresse --------------------------------------------------
+// Sur validation uniquement : la politique d'usage de Nominatim interdit les
+// recherches declenchees a chaque frappe.
+const champQ = $("q");
+const zoneResultats = $("resultats");
+
+async function lanceRecherche() {
+  const q = champQ.value.trim();
+  if (q.length < 3) return;
+  zoneResultats.innerHTML = "<div>Recherche…</div>";
+  try {
+    const lieux = await chercheAdresse(q);
+    zoneResultats.innerHTML = "";
+    if (!lieux.length) { zoneResultats.innerHTML = "<div>Aucun résultat.</div>"; return; }
+    lieux.slice(0, 5).forEach((lieu) => {
+      const d = document.createElement("div");
+      d.textContent = lieu.display_name;
+      d.onclick = () => {
+        pose(L.latLng(parseFloat(lieu.lat), parseFloat(lieu.lon)), true);
+        zoneResultats.innerHTML = ""; champQ.value = "";
+      };
+      zoneResultats.appendChild(d);
+    });
+  } catch (e) {
+    zoneResultats.innerHTML = "<div>Recherche indisponible pour l'instant. "
+                            + "Pose le départ à la souris.</div>";
+  }
+}
+
+$("btn-chercher").onclick = lanceRecherche;
+champQ.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); lanceRecherche(); }
+});
+
+// --- reglages retenus -----------------------------------------------------
+if (memoire.km) { champKm.value = memoire.km; curseur.value = memoire.km; }
+if (memoire.niveau) champNiveau.value = memoire.niveau;
+champKm.addEventListener("input", () => {
+  curseur.value = champKm.value; ecritMemoire({ km: champKm.value });
+});
+curseur.addEventListener("input", () => {
+  champKm.value = curseur.value; ecritMemoire({ km: curseur.value });
+});
+champNiveau.addEventListener("change", () => ecritMemoire({ niveau: champNiveau.value }));
+
+$("btn-oublier").onclick = (e) => {
+  e.preventDefault();
+  try { localStorage.removeItem(MEMOIRE); } catch (err) { /* rien a faire */ }
+  travailleur.postMessage({ type: "vide-cache" });
+  message.innerHTML = '<p class="aide">Réglages et données en cache effacés. '
+                    + 'Recharge la page pour repartir de zéro.</p>';
+};
+
+// --- generation -----------------------------------------------------------
+function afficheErreur(texte) {
+  message.innerHTML = `<p class="erreur">${texte}</p>`;
+}
+
+const travailleur = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+let debut = 0;
+let minuteurAffichage = null;
+
+travailleur.onmessage = ({ data }) => {
+  if (data.type === "journal") {
+    journal.textContent += (journal.textContent ? "\n" : "") + data.ligne;
+    journal.scrollTop = journal.scrollHeight;
+    const faits = (journal.textContent.match(/^ {2}cap /gm) || []).length;
+    barre.firstElementChild.style.width = Math.min(96, 8 + (faits / 16) * 88) + "%";
+    return;
+  }
+  if (data.type === "fini") {
+    finGeneration();
+    barre.firstElementChild.style.width = "100%";
+    dessine(data.resultat);
+    return;
+  }
+  if (data.type === "erreur") { finGeneration(); afficheErreur(data.message); }
+};
+
+travailleur.onerror = () => {
+  finGeneration();
+  afficheErreur("Le moteur de calcul n'a pas pu démarrer. Ton navigateur est "
+              + "peut-être trop ancien : il faut un navigateur à jour.");
+};
+
+bouton.onclick = () => {
+  if (!marqueur) return afficheErreur("Pose d'abord ton départ sur la carte.");
+  const p = marqueur.getLatLng();
+  const arrivee = (caseArrivee.checked && marqueurArrivee)
+    ? marqueurArrivee.getLatLng() : null;
+  if (caseArrivee.checked && !arrivee) return afficheErreur("Pose l'arrivée sur la carte.");
+  const km = parseFloat(champKm.value);
+  if (!(km > 0)) return afficheErreur("Distance invalide.");
+
+  enCours = true;
+  bouton.disabled = true;
+  bouton.textContent = "Recherche en cours…";
+  journal.style.display = "block"; journal.textContent = "";
+  barre.style.display = "block"; barre.firstElementChild.style.width = "0";
+  bilan.style.display = "none"; message.innerHTML = "";
+  if (trace) { carte.removeLayer(trace); trace = null; }
+
+  debut = Date.now();
+  minuteurAffichage = setInterval(() => {
+    bouton.textContent = `Recherche en cours… ${Math.round((Date.now() - debut) / 1000)} s`;
+  }, 1000);
+
+  travailleur.postMessage({
+    type: "generer",
+    parametres: {
+      lat: p.lat, lon: p.lng, km,
+      arrivee: arrivee ? [arrivee.lat, arrivee.lng] : null,
+      niveau: champNiveau.value,
+    },
+  });
+};
+
+function finGeneration() {
+  enCours = false;
+  clearInterval(minuteurAffichage);
+  bouton.textContent = "Générer le parcours";
+  majCoord(false);
+}
+
+function telecharge(contenu, nomFichier, type) {
+  const url = URL.createObjectURL(new Blob([contenu], { type }));
+  const lien = document.createElement("a");
+  lien.href = url; lien.download = nomFichier;
+  document.body.appendChild(lien); lien.click(); lien.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function dessine(r) {
+  trace = L.polyline(r.points, { color: "#e8590c", weight: 4.5, opacity: .92 })
+           .addTo(carte);
+  carte.fitBounds(trace.getBounds(), { padding: [40, 40] });
+
+  const km = (m) => (m / 1000).toFixed(2) + " km";
+  const pct = (m) => ` (${(m / r.longueurBoucle * 100).toFixed(0)} %)`;
+  const propre = r.repetee < 1;
+
+  let html = `<div class="titre-bloc">${r.boucle ? "Boucle" : "Parcours"} retenu</div><table>`;
+  html += `<tr><td>Distance</td><td><b>${km(r.distance)}</b> `
+        + `(${r.distance - r.cible >= 0 ? "+" : ""}${Math.round(r.distance - r.cible)} m)</td></tr>`;
+  html += `<tr><td>Aller-retour</td><td class="${propre ? "bon" : ""}">`
+        + `${propre ? "aucun" : Math.round(r.repetee) + " m"}</td></tr>`;
+  html += `<tr><td>Départ à</td><td>${Math.round(r.accroche)} m du point posé</td></tr>`;
+  html += "</table>";
+
+  html += '<div class="titre-bloc">Praticabilité vérifiée</div><table>';
+  r.qualites.forEach(([q, m]) => {
+    html += `<tr><td>${q}</td><td>${km(m)}${pct(m)}</td></tr>`;
+  });
+  html += "</table>";
+
+  html += '<div class="titre-bloc">Type de voie</div><table>';
+  r.types.forEach(([t, m]) => {
+    html += `<tr><td>${t}</td><td>${km(m)}${pct(m)}</td></tr>`;
+  });
+  html += "</table>";
+
+  // L'avertissement s'affiche avec le resultat, la ou il compte, et pas
+  // seulement dans une page que personne n'ouvre.
+  html += '<p class="avertissement">La carte peut se tromper. Vérifie le tracé '
+        + 'avant de partir, respecte le code de la route et les propriétés '
+        + 'privées, et regarde où tu mets les pieds.</p>';
+
+  html += '<div class="ligne" style="margin-top:10px">'
+        + '<button class="secondaire" id="btn-gpx">Télécharger le GPX</button>'
+        + '<button class="secondaire" id="btn-geojson" style="flex:0 0 auto;width:auto">'
+        + 'GeoJSON</button></div>';
+
+  bilan.innerHTML = html;
+  bilan.style.display = "block";
+
+  const nomFichier = `${new Date().toISOString().slice(0, 10)}_`
+                   + `${(r.distance / 1000).toFixed(1)}km`;
+  $("btn-gpx").onclick = () =>
+    telecharge(r.gpx, `${nomFichier}.gpx`, "application/gpx+xml");
+  $("btn-geojson").onclick = () =>
+    telecharge(r.geojson, `${nomFichier}.geojson`, "application/geo+json");
+}
+
+majCoord(false);

@@ -1,0 +1,10 @@
+{
+  "name": "genere-boucle-web",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "fixtures": "python3 tests/parite.py genere_boucle.py tests/fixtures"
+  }
+}

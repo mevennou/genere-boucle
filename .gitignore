@@ -1,0 +1,24 @@
+# Cache du reseau OSM et de Leaflet (volumineux, regenere tout seul)
+.cache_osm/
+
+# Traces generees : elles revelent les points de depart
+*.gpx
+*.geojson
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Systeme et editeurs
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Dependances et archives de travail
+node_modules/
+*.tgz
+package/

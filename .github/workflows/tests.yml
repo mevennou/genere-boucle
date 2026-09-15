@@ -1,0 +1,24 @@
+# Rejoue la batterie complete a chaque envoi. Les fixtures sont regenerees
+# depuis le script Python d'origine : si quelqu'un modifie l'algorithme d'un
+# cote sans l'autre, la parite casse ici et pas en production.
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Regenerer les fixtures depuis le Python d'origine
+        run: npm run fixtures
+      - name: Batterie de tests
+        run: npm test

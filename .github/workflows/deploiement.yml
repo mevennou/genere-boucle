@@ -1,0 +1,41 @@
+# Publie le dossier docs tel quel, sans passer par Jekyll.
+#
+# La publication historique de GitHub Pages fait tourner Jekyll sur le dossier
+# source, ce qui n'a aucun sens ici : le site est deja constitue de fichiers
+# statiques termines. Ce workflow televerse le dossier et le sert directement,
+# ce qui supprime toute une classe d'erreurs de construction.
+#
+# A activer une fois : Settings -> Pages -> Source -> GitHub Actions.
+name: Déploiement du site
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:          # permet aussi de relancer a la main
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Un seul deploiement a la fois, sans annuler celui qui est en cours.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploiement:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.publication.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - name: Téléverser le dossier docs
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./docs
+      - name: Publier
+        id: publication
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Générateur de boucles de course à pied</title>
+<meta name="description" content="Génère une boucle de course à pied d'une distance choisie, sans aller-retour, à partir des données OpenStreetMap. Tout est calculé dans votre navigateur.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏃</text></svg>">
+<link rel="preconnect" href="https://tile.openstreetmap.org" crossorigin>
+<link rel="stylesheet" href="./vendor/leaflet.css">
+<style>
+  :root {
+    --fond: #ffffff; --texte: #16181d; --doux: #667085; --bord: #e3e6ec;
+    --accent: #1f6feb; --accent-texte: #ffffff; --ok: #0f7b45; --alerte: #b42318;
+    --panneau: rgba(255,255,255,.97); --encart: #f6f8fa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fond: #14161a; --texte: #e9ecf1; --doux: #98a2b3; --bord: #2b3038;
+      --accent: #4c8dff; --accent-texte: #0b1220; --ok: #3ecf8e; --alerte: #ff7b72;
+      --panneau: rgba(20,22,26,.97); --encart: #1b1e23;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+    color: var(--texte); background: var(--fond); overflow: hidden;
+  }
+  #carte { position: absolute; inset: 0; background: #e8e4dd; }
+  @media (prefers-color-scheme: dark) { #carte { background: #23262b; } }
+  .leaflet-tile { image-rendering: -webkit-optimize-contrast; }
+
+  #panneau {
+    position: absolute; top: 12px; left: 12px; z-index: 1000;
+    width: 352px; max-height: calc(100% - 24px); overflow-y: auto;
+    background: var(--panneau); border: 1px solid var(--bord);
+    border-radius: 12px; padding: 14px;
+    box-shadow: 0 8px 28px rgba(0,0,0,.16); backdrop-filter: blur(6px);
+  }
+  @media (max-width: 720px) {
+    #panneau { width: auto; right: 12px; max-height: 62%; }
+  }
+  h1 { font-size: 15px; margin: 0 0 2px; letter-spacing: -.01em; }
+  .sous { color: var(--doux); font-size: 12px; margin: 0 0 12px; }
+  label { display: block; font-weight: 600; font-size: 12px; margin: 12px 0 4px; }
+  input, select, button {
+    font: inherit; width: 100%; padding: 8px 10px;
+    border: 1px solid var(--bord); border-radius: 8px;
+    background: var(--fond); color: var(--texte);
+  }
+  input:focus, select:focus, button:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: -1px;
+  }
+  button {
+    background: var(--accent); color: var(--accent-texte);
+    border: none; font-weight: 600; cursor: pointer; padding: 10px;
+  }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  button.secondaire {
+    background: transparent; color: var(--texte); border: 1px solid var(--bord);
+    font-weight: 500; padding: 7px;
+  }
+  .ligne { display: flex; gap: 8px; }
+  .ligne > * { flex: 1; }
+  .aide { color: var(--doux); font-size: 11.5px; margin-top: 4px; }
+  .point { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+  .jeton {
+    width: auto; flex: 0 0 auto; padding: 5px 11px; font-size: 12px;
+    font-weight: 500; background: transparent; color: var(--texte);
+    border: 1px solid var(--bord); cursor: pointer;
+  }
+  .jeton.actif { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+  .coord-ligne { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                 font-size: 12.5px; }
+  .case { display: flex; align-items: center; gap: 8px; margin: 10px 0 0;
+          font-weight: 600; font-size: 12px; cursor: pointer; }
+  .case input { width: auto; margin: 0; }
+  #resultats div {
+    padding: 7px 9px; border: 1px solid var(--bord); border-radius: 8px;
+    margin-top: 4px; cursor: pointer; font-size: 12.5px;
+  }
+  #resultats div:hover { border-color: var(--accent); }
+  #journal {
+    display: none; margin-top: 12px; padding: 9px 10px; font-size: 11.5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--fond); border: 1px solid var(--bord); border-radius: 8px;
+    max-height: 168px; overflow-y: auto; white-space: pre-wrap; color: var(--doux);
+  }
+  #barre { display: none; height: 4px; background: var(--bord);
+           border-radius: 99px; overflow: hidden; margin-top: 10px; }
+  #barre > i { display: block; height: 100%; width: 0; background: var(--accent);
+               transition: width .4s ease; }
+  #bilan { display: none; margin-top: 12px; }
+  #bilan table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  #bilan td { padding: 3px 0; vertical-align: top; }
+  #bilan td:first-child { color: var(--doux); padding-right: 10px; white-space: nowrap; }
+  #bilan td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+  .titre-bloc { font-weight: 600; font-size: 11px; text-transform: uppercase;
+                letter-spacing: .04em; color: var(--doux); margin: 12px 0 4px; }
+  .erreur { color: var(--alerte); font-size: 12.5px; margin-top: 10px; }
+  .bon { color: var(--ok); }
+  .avertissement {
+    background: var(--encart); border: 1px solid var(--bord);
+    border-left: 3px solid var(--alerte); border-radius: 0 8px 8px 0;
+    padding: 9px 11px; margin: 12px 0 0; font-size: 12px; color: var(--texte);
+  }
+  #pied { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--bord);
+          color: var(--doux); font-size: 11.5px; }
+  #pied a { color: var(--doux); }
+  #sansjs { padding: 40px; max-width: 34em; margin: 0 auto; }
+</style>
+</head>
+<body>
+<div id="carte"></div>
+
+<div id="panneau">
+  <h1>Où pars-tu ?</h1>
+  <p class="sous">Clique sur la carte, ou fais glisser le marqueur. Zoome à fond
+     pour le poser au bon endroit.</p>
+
+  <label for="q">Chercher une adresse</label>
+  <div class="ligne">
+    <input id="q" placeholder="ville, rue, lieu-dit…" autocomplete="off"
+           aria-label="Chercher une adresse">
+    <button class="secondaire" id="btn-chercher" style="flex:0 0 auto;width:auto">
+      Chercher</button>
+  </div>
+  <div class="ligne" style="margin-top:6px">
+    <button class="secondaire" id="btn-position">Utiliser ma position</button>
+  </div>
+  <div id="resultats"></div>
+
+  <label>Points du parcours</label>
+  <div class="point">
+    <button class="jeton actif" id="jeton-depart" type="button">Départ</button>
+    <span class="coord-ligne"><b id="lat">--</b>, <b id="lon">--</b></span>
+  </div>
+  <div class="point" id="bloc-arrivee" hidden>
+    <button class="jeton" id="jeton-arrivee" type="button">Arrivée</button>
+    <span class="coord-ligne"><b id="lat2">--</b>, <b id="lon2">--</b></span>
+  </div>
+  <label class="case">
+    <input type="checkbox" id="case-arrivee">
+    Arrivée différente du départ
+  </label>
+  <p class="aide" id="precision"></p>
+
+  <label for="km">Distance souhaitée</label>
+  <div class="ligne">
+    <input id="km" type="number" min="1" max="150" step="0.1" value="7">
+    <input id="curseur" type="range" min="1" max="80" step="0.5" value="7"
+           style="padding:0" aria-label="Distance en kilomètres">
+  </div>
+  <p class="aide">Une tolérance de 3 % est admise : entre deux boucles, celle qui
+     ne se répète pas l'emporte sur celle qui tombe pile.</p>
+
+  <label for="niveau">Exigence de praticabilité</label>
+  <select id="niveau">
+    <option value="strict">Stricte — bitume et stabilisé uniquement</option>
+    <option value="normal" selected>Normale — chemins documentés et balisés</option>
+    <option value="tolerant">Tolérante — accepte les sentiers non documentés</option>
+  </select>
+
+  <button id="btn-generer" style="margin-top:14px">Générer le parcours</button>
+  <div id="barre"><i></i></div>
+  <div id="journal"></div>
+  <div id="bilan"></div>
+  <div id="message"></div>
+
+  <div id="pied">
+    <p style="margin:0 0 6px">Tout est calculé dans ton navigateur. Aucune donnée
+       n'est envoyée à l'éditeur du site.</p>
+    <p style="margin:0">
+      <a href="./mentions-legales.html">Mentions légales</a> ·
+      <a href="https://github.com/mevennou/genere-boucle">Code source</a> ·
+      <a href="#" id="btn-oublier">Effacer mes réglages</a>
+    </p>
+  </div>
+</div>
+
+<noscript>
+  <div id="sansjs">
+    <h1>JavaScript est nécessaire</h1>
+    <p>Ce site calcule les itinéraires directement dans votre navigateur, il ne
+       dispose d'aucun serveur de calcul. Sans JavaScript, il ne peut rien
+       afficher. Le même outil existe en version Python à lancer sur votre
+       machine : <a href="https://github.com/mevennou/genere-boucle">code
+       source</a>.</p>
+  </div>
+</noscript>
+
+<script src="./vendor/leaflet.js"></script>
+<script type="module" src="./js/app.js"></script>
+</body>
+</html>
