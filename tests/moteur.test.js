@@ -211,3 +211,61 @@ test("performance : une generation reste sous la seconde sur ce reseau", async (
             + "(16 orientations x 4 formes x 10 iterations)");
   assert.ok(duree < 5000, `trop lent : ${duree.toFixed(0)} ms`);
 });
+
+// --- depart et arrivee differents ----------------------------------------
+// Ce mode n'etait couvert par aucun test : une variable manquante y est passee
+// inapercue jusqu'en production. Il est desormais exerce comme le reste.
+test("parcours A vers B : genere un trace entre deux points distincts", async () => {
+  const arrivee = [47.0096 + 0.004, 5.0096 + 0.004];
+  for (const km of [2, 3]) {
+    const r = await genere({
+      lat: DEPART[0], lon: DEPART[1], cibleM: km * 1000, arrivee,
+      iterations: 8, source: sourceLocale(),
+    });
+    assert.equal(r.boucle, false);
+    const premier = r.points[0], dernier = r.points[r.points.length - 1];
+    assert.ok(distanceHaversine(premier[0], premier[1], DEPART[0], DEPART[1]) < 200,
+      "le trace doit partir du point demande");
+    assert.ok(distanceHaversine(dernier[0], dernier[1], arrivee[0], arrivee[1]) < 200,
+      "le trace doit finir a l'arrivee demandee");
+    assert.ok(distanceHaversine(premier[0], premier[1], dernier[0], dernier[1]) > 300,
+      "ce n'est pas une boucle");
+    const ecart = Math.abs(r.distance - km * 1000) / (km * 1000);
+    assert.ok(ecart < 0.08, `${km} km : ecart de ${(ecart * 100).toFixed(1)} %`);
+  }
+});
+
+test("parcours A vers B : un reseau trop petit rend le possible, sans mentir", async () => {
+  // Le damier de test sature vers 3,5 km. Demander davantage ne doit ni
+  // planter, ni fabriquer de la distance en doublant des portions : le moteur
+  // rend le meilleur parcours et l'ecart reste lisible dans le resultat.
+  const r = await genere({
+    lat: DEPART[0], lon: DEPART[1], cibleM: 5000,
+    arrivee: [47.0096 + 0.004, 5.0096 + 0.004], iterations: 8, source: sourceLocale(),
+  });
+  assert.ok(r.distance < 5000, "le reseau ne permet pas la distance demandee");
+  assert.equal(r.cible, 5000, "la cible demandee reste exposee pour l'affichage");
+  assert.ok(r.doublement <= 30,
+    "manquer la distance est acceptable, doubler une portion ne l'est pas");
+});
+
+test("parcours A vers B : le controle anti-doublement s'applique aussi", async () => {
+  const r = await genere({
+    lat: DEPART[0], lon: DEPART[1], cibleM: 5000,
+    arrivee: [47.0096 + 0.004, 5.0096 + 0.004], iterations: 8, source: sourceLocale(),
+  });
+  assert.equal(typeof r.doublement, "number", "la mesure doit remonter");
+  assert.ok(r.doublement <= Math.max(30, 5000 * 0.005),
+    `${r.doublement.toFixed(0)} m doubles sur le parcours`);
+  const sommeTypes = r.types.reduce((s, [, m]) => s + m, 0);
+  assert.ok(Math.abs(sommeTypes - r.longueurBoucle) < 1, "statistiques incoherentes");
+});
+
+test("parcours A vers B : distance impossible, message clair", async () => {
+  // Plus court que le plus court chemin praticable : il faut le dire, pas
+  // inventer un trace.
+  await assert.rejects(
+    genere({ lat: DEPART[0], lon: DEPART[1], cibleM: 200,
+             arrivee: [47.0096 + 0.008, 5.0096 + 0.008], source: sourceLocale() }),
+    (e) => /trop courte|plus court chemin/i.test(e.message));
+});

@@ -294,6 +294,7 @@ function traceVersArrivee({
 
   journal(`4/5 Recherche du parcours (plus court chemin : ${km(totalMinimum)} km)`);
   let meilleur = null;
+  const reserve = [];
   for (const nombre of [1, 2, 3, 4]) {
     let ligne = `  ${nombre} point(s) de passage :`;
     for (const [cote, libelle] of [[1.0, "gauche"], [-1.0, "droite"]]) {
@@ -322,6 +323,29 @@ function traceVersArrivee({
                           noeudArrivee, departLL, arriveeLL, budget, tolerance,
                           repetitionMax, meilleur);
 
+  // Meme controle geometrique que pour les boucles : un parcours d'un point a
+  // un autre peut tout aussi bien longer une portion de lui-meme, par la rue a
+  // l'aller et le trottoir au retour.
+  const seuilDoublement = Math.max(30, cibleM * 0.005);
+  const pointsDe = (essai) =>
+    allege(polyligneDuTrajet(essai[3], aretes).map((n) => [latN[n], lonN[n]]), maxPoints);
+
+  reserve.sort((a, b) => compareNote(a[0], b[0]));
+  const candidats = [meilleur, ...reserve.filter((c) => c !== meilleur)].slice(0, 8);
+  let choisi = null, doublement = null;
+  for (const candidat of candidats) {
+    const mesure = mesureDoublement(pointsDe(candidat));
+    if (choisi === null) { choisi = candidat; doublement = mesure; }
+    if (mesure.longueur <= seuilDoublement) { choisi = candidat; doublement = mesure; break; }
+  }
+  if (doublement.longueur > seuilDoublement) {
+    journal(`  aucun parcours sans portion doublee a cette distance : le meilleur `
+          + `longe ${doublement.longueur.toFixed(0)} m de lui-meme`);
+  } else if (choisi !== meilleur) {
+    journal("  le meilleur parcours doublait une portion : candidat suivant retenu");
+  }
+  meilleur = choisi;
+
   const [, longueur, repetee, trajet, nombre] = meilleur;
 
   let noeuds = amorce.length ? polyligneDuTrajet(amorce, aretes) : [];
@@ -335,7 +359,9 @@ function traceVersArrivee({
 
   const points = allege(noeuds.map((n) => [latN[n], lonN[n]]), maxPoints);
   const distance = longueur + longueurAmorce + longueurAmorceArrivee;
-  journal(`5/5 Parcours retenu : ${km(distance)} km, ${repetee.toFixed(0)} m parcourus deux fois`);
+  journal(`5/5 Parcours retenu : ${km(distance)} km, ${repetee.toFixed(0)} m parcourus deux fois`
+        + (doublement.longueur > 0
+           ? `, ${doublement.longueur.toFixed(0)} m longeant une autre portion` : ""));
 
   return {
     points, distance, cible: cibleM, repetee,
@@ -346,6 +372,7 @@ function traceVersArrivee({
     qualites: repartition(trajet, aretes, "qualite")
       .map(([q, m]) => [LIBELLES_QUALITE[q] || q, m]),
     longueurBoucle: longueur, boucle: false,
+    doublement: doublement.longueur, portionsDoublees: doublement.portions.length,
   };
 }
 

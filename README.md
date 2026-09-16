@@ -66,12 +66,27 @@ Sans argument, une carte s'ouvre sur `http://127.0.0.1:8765/` : on y pose son d�
 
 ```bash
 npm run fixtures    # rejoue le Python d'origine et enregistre ses sorties
-npm test            # 72 tests
+npm test            # 87 tests
 ```
 
 Les fixtures sont produites en exécutant le vrai code Python, pas une réimplémentation. Le portage JavaScript est ensuite comparé à ces sorties : verdicts de praticabilité sur plusieurs dizaines de milliers de combinaisons de tags, géométrie sphérique sur 2000 tirages, classement des boucles candidates, et distances de bout en bout sur un réseau fabriqué — où les deux versions tombent au mètre près.
 
 Le reste de la batterie couvre la contraction du graphe, la réduction 2-cœur, l'A\* et sa pénalité, la validité du GPX produit, le chargement réel de l'interface, et la conformité du site (aucun CDN, aucun traceur, attribution présente, avertissement affiché avec le résultat).
+
+## Statistiques d'usage
+
+Le site compte trois événements : ouverture de la page, génération réussie,
+génération en échec. Il transmet le nom de l'événement, une tranche de distance
+parmi six et le niveau d'exigence — jamais le point de départ, le tracé,
+l'adresse recherchée ni le moindre identifiant. Le compteur n'enregistre que
+des agrégats journaliers, sans adresse IP ni ligne par visiteur, ce qui permet
+de se passer de bandeau de consentement. Global Privacy Control, Do Not Track
+et le lien « Ne pas être compté » sont respectés.
+
+La mesure est **désactivée par défaut** : sans adresse renseignée dans la balise
+`point-de-mesure` de `docs/index.html`, le site n'émet aucun appel. Pour
+déployer son propre compteur, voir `compteur/README.md`. La version Python ne
+comporte aucun comptage.
 
 ## Vie privée
 
