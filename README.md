@@ -20,12 +20,15 @@ Ce n'est pas un simple appel à un serveur de routage.
 2. Le graphe piétonnier est **construit ici**, et n'accueille que les voies dont les tags OSM attestent la praticabilité. Un sentier broussailleux, une trace informelle, un gué, une voie privée n'existent tout simplement pas dans le graphe : l'itinéraire ne peut pas y passer. C'est une garantie structurelle, pas une pénalité qu'une bonne distance pourrait compenser.
 3. Toutes les impasses sont supprimées (réduction dite « 2-cœur » : retrait itératif des nœuds n'ayant qu'un seul voisin). Plus d'antenne sans issue, donc plus d'aller-retour ni de demi-tour.
 4. La boucle est cherchée par un polygone d'ancres (3 à 6 sommets) autour du départ, chaque tronçon calculé en A\* avec une forte pénalité sur les arêtes déjà empruntées : la distance cible est atteinte en **élargissant** la boucle, jamais en ajoutant des va-et-vient.
+5. Une rue et son trottoir cartographié à part sont deux arêtes distinctes du graphe, mais une seule voie sur le terrain : elles sont regroupées en **couloirs**, pour qu'aller par l'une et revenir par l'autre compte comme un aller-retour. Le tracé retenu subit enfin un contrôle géométrique, qui mesure la longueur longeant une autre portion du parcours et écarte le candidat au profit du suivant si besoin.
 
 ## Le site
 
 Hébergé sur GitHub Pages, donc statique : il n'y a aucun serveur de calcul. Le navigateur télécharge le réseau OSM, construit le graphe et cherche la boucle sur la machine du visiteur, dans un *web worker* pour que la carte reste manipulable pendant la recherche. Conséquence heureuse : la charge reste diffuse sur les serveurs bénévoles d'OpenStreetMap, puisque chaque visiteur interroge Overpass depuis chez lui.
 
 Le portage JavaScript est environ **neuf fois plus rapide** que la version Python à résultat identique, parce qu'il travaille sur des indices denses et des tableaux typés plutôt que sur des tables de hachage indexées par identifiants OSM, et qu'il réutilise ses tableaux de travail d'un appel d'A\* au suivant.
+
+L'interface s'adapte au téléphone : le panneau devient une feuille que l'on replie d'un geste pour dégager la carte, les commandes de zoom sont placées à l'opposé et dimensionnées pour le pouce, et le parcours généré replie automatiquement la feuille.
 
 Navigateur requis : un navigateur à jour, les modules ES dans les workers étant nécessaires.
 
@@ -63,7 +66,7 @@ Sans argument, une carte s'ouvre sur `http://127.0.0.1:8765/` : on y pose son d�
 
 ```bash
 npm run fixtures    # rejoue le Python d'origine et enregistre ses sorties
-npm test            # 55 tests
+npm test            # 72 tests
 ```
 
 Les fixtures sont produites en exécutant le vrai code Python, pas une réimplémentation. Le portage JavaScript est ensuite comparé à ces sorties : verdicts de praticabilité sur plusieurs dizaines de milliers de combinaisons de tags, géométrie sphérique sur 2000 tirages, classement des boucles candidates, et distances de bout en bout sur un réseau fabriqué — où les deux versions tombent au mètre près.

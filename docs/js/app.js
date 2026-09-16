@@ -51,9 +51,32 @@ const carte = L.map("carte", {
   zoom: departConnu ? (memoire.zoom || 16) : 5,
   layers: [fonds["Plan"]],
   preferCanvas: true,
+  zoomControl: false,          // remplace par #outils-carte, visibles au pouce
+  tap: false,                  // evite le double declenchement sur iOS
 });
 L.control.layers(fonds, {}, { position: "topright" }).addTo(carte);
 L.control.scale({ imperial: false, position: "bottomleft" }).addTo(carte);
+
+// --- outils de carte ------------------------------------------------------
+$("zoom-plus").onclick = () => carte.zoomIn();
+$("zoom-moins").onclick = () => carte.zoomOut();
+$("recentrer").onclick = () => {
+  if (trace) return carte.fitBounds(trace.getBounds(), { padding: [40, 40] });
+  if (marqueur) return carte.setView(marqueur.getLatLng(), Math.max(carte.getZoom(), 16));
+};
+
+// --- feuille basse sur mobile --------------------------------------------
+// Sur telephone le panneau devient une feuille que l'on replie : sinon il
+// mange l'ecran et la carte, qui est l'essentiel, n'a plus de place.
+const panneau = $("panneau");
+const poignee = $("poignee");
+const estMobile = () => window.matchMedia("(max-width: 720px)").matches;
+
+function replie(actif) {
+  panneau.classList.toggle("replie", actif);
+  poignee.setAttribute("aria-expanded", actif ? "false" : "true");
+}
+poignee.onclick = () => replie(!panneau.classList.contains("replie"));
 
 // --- points de depart et d'arrivee ---------------------------------------
 const jetonDepart = $("jeton-depart");
@@ -308,6 +331,15 @@ function dessine(r) {
            .addTo(carte);
   carte.fitBounds(trace.getBounds(), { padding: [40, 40] });
 
+  // Une fois le parcours trouve, c'est la carte qu'on veut voir : sur
+  // telephone la feuille se replie et garde l'essentiel sous les yeux.
+  const doubles = r.doublement > 0
+    ? `, ${Math.round(r.doublement)} m longeant une autre portion` : "";
+  $("resume").textContent = `${(r.distance / 1000).toFixed(2)} km`
+    + (r.repetee < 1 ? ", sans aller-retour" : `, ${Math.round(r.repetee)} m repassés`)
+    + doubles;
+  if (estMobile()) replie(true);
+
   const km = (m) => (m / 1000).toFixed(2) + " km";
   const pct = (m) => ` (${(m / r.longueurBoucle * 100).toFixed(0)} %)`;
   const propre = r.repetee < 1;
@@ -318,6 +350,9 @@ function dessine(r) {
   html += `<tr><td>Aller-retour</td><td class="${propre ? "bon" : ""}">`
         + `${propre ? "aucun" : Math.round(r.repetee) + " m"}</td></tr>`;
   html += `<tr><td>Départ à</td><td>${Math.round(r.accroche)} m du point posé</td></tr>`;
+  if (r.doublement > 0) {
+    html += `<tr><td>Portions longées</td><td>${Math.round(r.doublement)} m</td></tr>`;
+  }
   html += "</table>";
 
   html += '<div class="titre-bloc">Praticabilité vérifiée</div><table>';

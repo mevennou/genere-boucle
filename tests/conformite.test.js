@@ -137,3 +137,40 @@ test("aucune cle d'API ni secret dans le depot", () => {
     assert.ok(!motif.test(toutLeJS), `secret potentiel : ${motif}`);
   }
 });
+
+test("les commandes de carte ne repassent pas sous le panneau", () => {
+  const app = lit(join("js", "app.js"));
+  // Les boutons natifs de Leaflet se placent en haut a gauche, exactement la
+  // ou se trouve le panneau : ils etaient invisibles. Ils doivent rester
+  // desactives au profit de #outils-carte.
+  assert.ok(/zoomControl:\s*false/.test(app),
+    "le controle de zoom natif doit rester desactive");
+  for (const id of ["outils-carte", "zoom-plus", "zoom-moins", "recentrer"]) {
+    assert.ok(html.includes(`id="${id}"`), `commande manquante : #${id}`);
+  }
+  for (const id of ["zoom-plus", "zoom-moins", "recentrer"]) {
+    assert.ok(app.includes(`$("${id}")`), `#${id} n'est pas cable`);
+  }
+  assert.ok(html.includes('aria-label="Zoomer"'), "les boutons doivent etre nommes");
+});
+
+test("la mise en page mobile respecte les contraintes des telephones", () => {
+  const styles = html.slice(html.indexOf("<style>"), html.indexOf("</style>"));
+  const mobile = styles.slice(styles.indexOf("@media (max-width: 720px)"));
+  assert.ok(/font-size:\s*16px/.test(mobile),
+    "sous 16 px, iOS zoome tout seul a la saisie");
+  assert.ok(/env\(safe-area-inset-bottom\)/.test(mobile),
+    "la feuille basse doit degager la barre systeme");
+  assert.ok(/dvh/.test(mobile), "utiliser dvh plutot que vh sur mobile");
+  assert.ok(html.includes('id="poignee"'), "la feuille doit pouvoir se replier");
+});
+
+test("le controle anti-doublement est bien branche", () => {
+  const moteur = lit(join("js", "moteur.js"));
+  assert.ok(moteur.includes("mesureDoublement"), "le controle geometrique doit etre appele");
+  assert.ok(moteur.includes("detecteCorridors"), "les voies jumelles doivent etre regroupees");
+  assert.ok(/doublement:/.test(moteur), "la mesure doit remonter dans le resultat");
+  const routage = lit(join("js", "routage.js"));
+  assert.ok(routage.includes("this.couloir[indexArete]"),
+    "la penalite doit raisonner par couloir");
+});

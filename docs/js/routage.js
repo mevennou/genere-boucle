@@ -79,7 +79,7 @@ export class Routeur {
    * @param aretes tableau d'aretes contractees
    * @param lat,lon coordonnees par indice de noeud
    */
-  constructor(csr, aretes, lat, lon, nbNoeuds) {
+  constructor(csr, aretes, lat, lon, nbNoeuds, couloir = null) {
     this.csr = csr;
     this.aretes = aretes;
     this.lat = lat; this.lon = lon;
@@ -97,6 +97,10 @@ export class Routeur {
     this.tamponH = new Int32Array(nbNoeuds);
     this.passage = 0;
 
+    // Une rue et son trottoir cartographie a part sont deux aretes, mais une
+    // seule voie physique. La penalite raisonne par couloir, sinon revenir par
+    // le trottoir ne couterait rien apres etre alle par la rue.
+    this.couloir = couloir || Int32Array.from({ length: aretes.length }, (_, i) => i);
     this.tamponPenalite = new Int32Array(aretes.length);
     this.passagePenalite = 0;
 
@@ -106,10 +110,12 @@ export class Routeur {
   /** Ouvre une nouvelle serie de penalites : les precedentes sont oubliees. */
   nouvellesPenalites() { this.passagePenalite += 1; }
 
-  penalise(indexArete) { this.tamponPenalite[indexArete] = this.passagePenalite; }
+  penalise(indexArete) {
+    this.tamponPenalite[this.couloir[indexArete]] = this.passagePenalite;
+  }
 
   estPenalisee(indexArete) {
-    return this.tamponPenalite[indexArete] === this.passagePenalite;
+    return this.tamponPenalite[this.couloir[indexArete]] === this.passagePenalite;
   }
 
   _h(noeud, latBut, lonBut) {
@@ -149,7 +155,7 @@ export class Routeur {
         if (this.vu[v] === passage) continue;
         const index = arete[k];
         let poids = this.poids[index];
-        if (this.tamponPenalite[index] === this.passagePenalite) poids *= PENALITE;
+        if (this.tamponPenalite[this.couloir[index]] === this.passagePenalite) poids *= PENALITE;
         const nouveau = cout + poids;
         if (this.tampon[v] !== passage || nouveau < this.cout[v]) {
           this.cout[v] = nouveau;

@@ -32,6 +32,9 @@ function faitElement(id = "") {
     declenche(type, evenement = {}) {
       for (const fn of (ecouteurs.get(type) || [])) fn(evenement);
     },
+    attributs: new Map(),
+    setAttribute(nom, valeur) { this.attributs.set(nom, String(valeur)); },
+    getAttribute(nom) { return this.attributs.get(nom) ?? null; },
     appendChild() {}, remove() {}, click() {},
   };
 }
@@ -49,6 +52,7 @@ function installeDOM() {
       return elements.get(id) || null;
     },
     createElement: () => faitElement(),
+    documentElement: faitElement(),
     body: { appendChild() {} },
   };
   globalThis.localStorage = {
@@ -82,6 +86,8 @@ function installeDOM() {
       _ecouteurs: {},
       on(type, fn) { this._ecouteurs[type] = fn; },
       setView() { return this; }, getZoom: () => 16, fitBounds() {},
+      zoomIn() { globalThis.zoomFait = (globalThis.zoomFait || 0) + 1; },
+      zoomOut() { globalThis.zoomFait = (globalThis.zoomFait || 0) - 1; },
       removeLayer() {}, addLayer() {},
     }),
     tileLayer: () => couche(),
@@ -166,4 +172,34 @@ test("la recherche d'adresse part sur Entree, pas sur la frappe", async () => {
   let empeche = false;
   champ.declenche("keydown", { key: "Enter", preventDefault() { empeche = true; } });
   assert.ok(empeche, "la touche Entree doit etre interceptee");
+});
+
+test("les boutons de zoom sont cables sur la carte", async () => {
+  const { elements } = installeDOM();
+  globalThis.zoomFait = 0;
+  await import(`../docs/js/app.js?t=${Date.now()}`);
+  for (const id of ["zoom-plus", "zoom-moins", "recentrer"]) {
+    assert.ok(typeof elements.get(id).onclick === "function", `#${id} non cable`);
+  }
+  elements.get("zoom-plus").onclick();
+  elements.get("zoom-plus").onclick();
+  elements.get("zoom-moins").onclick();
+  assert.equal(globalThis.zoomFait, 1, "les clics doivent atteindre la carte");
+  // Recentrer sans parcours ni depart ne doit pas planter.
+  elements.get("recentrer").onclick();
+});
+
+test("la poignee replie et deplie le panneau", async () => {
+  const { elements } = installeDOM();
+  await import(`../docs/js/app.js?t=${Date.now()}`);
+  const panneau = elements.get("panneau");
+  const poignee = elements.get("poignee");
+  assert.ok(typeof poignee.onclick === "function", "la poignee doit etre cablee");
+
+  poignee.onclick();
+  assert.ok(panneau.classList.contains("replie"));
+  assert.equal(poignee.getAttribute("aria-expanded"), "false");
+  poignee.onclick();
+  assert.ok(!panneau.classList.contains("replie"));
+  assert.equal(poignee.getAttribute("aria-expanded"), "true");
 });

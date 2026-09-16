@@ -116,9 +116,23 @@ function assemble(routeur, etapes) {
 
   if (!trajetTotal.length) return null;
   const longueur = routeur.longueurTrajet(trajetTotal);
-  let repetee = 0;
+
+  // Repetition comptee par couloir et non par arete : aller par la rue et
+  // revenir par le trottoir d'a cote est un doublement, meme si ce sont deux
+  // aretes differentes. Un seul passage reste du au couloir, le reste est
+  // compte comme repete. Sans jumelle, la formule redonne exactement
+  // longueur x (n - 1), comme avant.
+  const parCouloir = new Map();
   for (const [index, n] of comptes) {
-    if (n > 1) repetee += routeur.longueurs[index] * (n - 1);
+    const c = routeur.couloir[index];
+    const entree = parCouloir.get(c) || { total: 0, plusLong: 0 };
+    entree.total += routeur.longueurs[index] * n;
+    entree.plusLong = Math.max(entree.plusLong, routeur.longueurs[index]);
+    parCouloir.set(c, entree);
+  }
+  let repetee = 0;
+  for (const { total, plusLong } of parCouloir.values()) {
+    repetee += Math.max(0, total - plusLong);
   }
   return [longueur, repetee, trajetTotal];
 }

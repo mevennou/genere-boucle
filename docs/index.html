@@ -39,8 +39,58 @@
     border-radius: 12px; padding: 14px;
     box-shadow: 0 8px 28px rgba(0,0,0,.16); backdrop-filter: blur(6px);
   }
+  #poignee { display: none; }
+
+  /* Outils de carte. Les boutons natifs de Leaflet se retrouvaient sous le
+     panneau, donc invisibles : on les remplace par des cibles franches,
+     placees a l'oppose et dimensionnees pour le pouce. */
+  #outils-carte {
+    position: absolute; z-index: 900; right: 12px; bottom: 34px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  #outils-carte button {
+    width: 46px; height: 46px; padding: 0; border-radius: 12px;
+    background: var(--panneau); color: var(--texte);
+    border: 1px solid var(--bord); box-shadow: 0 2px 10px rgba(0,0,0,.18);
+    font-size: 21px; font-weight: 600; line-height: 1; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #outils-carte button:active { transform: scale(.94); }
+  #outils-carte button[disabled] { opacity: .4; }
+
   @media (max-width: 720px) {
-    #panneau { width: auto; right: 12px; max-height: 62%; }
+    /* Feuille basse : le pouce atteint les commandes, et la carte occupe
+       enfin la moitie haute de l'ecran au lieu d'etre ecrasee. */
+    #panneau {
+      top: auto; bottom: 0; left: 0; right: 0; width: auto;
+      max-height: 74dvh; border-radius: 16px 16px 0 0;
+      border-left: none; border-right: none; border-bottom: none;
+      padding: 6px 14px calc(14px + env(safe-area-inset-bottom));
+      box-shadow: 0 -6px 24px rgba(0,0,0,.22);
+    }
+    #poignee {
+      display: flex; align-items: center; gap: 10px; width: 100%;
+      position: sticky; top: 0; z-index: 2; margin: 0 0 6px;
+      background: var(--panneau); border: none; padding: 8px 0 10px;
+      color: var(--texte); font-weight: 600; font-size: 13px; text-align: left;
+    }
+    #poignee::before {
+      content: ""; position: absolute; top: 2px; left: 50%;
+      transform: translateX(-50%); width: 38px; height: 4px;
+      border-radius: 99px; background: var(--bord);
+    }
+    #poignee span { flex: 1; }
+    #poignee i { font-style: normal; color: var(--doux); font-weight: 500; }
+    #panneau.replie { max-height: none; overflow: visible; }
+    #panneau.replie > *:not(#poignee) { display: none; }
+    #outils-carte { bottom: auto; top: 12px; right: 12px; }
+    /* 16 px minimum : en dessous, iOS zoome tout seul a la saisie. */
+    input, select, button { font-size: 16px; }
+    #panneau { font-size: 15px; }
+    button { padding: 13px; }
+    .jeton { padding: 9px 14px; font-size: 14px; }
+    #resultats div { padding: 11px 10px; font-size: 14px; }
+    #journal { max-height: 120px; }
   }
   h1 { font-size: 15px; margin: 0 0 2px; letter-spacing: -.01em; }
   .sous { color: var(--doux); font-size: 12px; margin: 0 0 12px; }
@@ -115,7 +165,17 @@
 <body>
 <div id="carte"></div>
 
+<div id="outils-carte">
+  <button id="zoom-plus" type="button" aria-label="Zoomer">+</button>
+  <button id="zoom-moins" type="button" aria-label="Dézoomer">&minus;</button>
+  <button id="recentrer" type="button" aria-label="Recentrer sur le parcours"
+          title="Recentrer">&#9678;</button>
+</div>
+
 <div id="panneau">
+  <button id="poignee" type="button" aria-expanded="true" aria-controls="panneau">
+    <span>Réglages</span><i id="resume"></i>
+  </button>
   <h1>Où pars-tu ?</h1>
   <p class="sous">Clique sur la carte, ou fais glisser le marqueur. Zoome à fond
      pour le poser au bon endroit.</p>

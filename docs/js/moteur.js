@@ -14,6 +14,8 @@ import {
   polyligneDuTrajet, viragesSerres, compareNote,
 } from "./boucle.js";
 import { repartition, allege } from "./sortie.js";
+import { detecteCorridors } from "./corridors.js";
+import { mesureDoublement } from "./controle.js";
 
 export class DonneesIndisponibles extends Error {}
 export class BoucleIntrouvable extends Error {}
@@ -104,8 +106,15 @@ export async function genere({
   journal(`  ${aretes.length} aretes, ${Math.floor(nbCoeur / 2)} apres elagage `
         + "des culs-de-sac");
 
+  const { couloir, nbJumelages } = detecteCorridors(aretes, latN, lonN);
+  if (nbJumelages) {
+    journal(`  ${nbJumelages} voies doublees d'un trottoir cartographie a part : `
+          + "regroupees, pour qu'aller par l'une et revenir par l'autre compte "
+          + "comme un aller-retour");
+  }
+
   const routeur = new Routeur(construitCSR(adjacence, nbNoeuds), aretes,
-                              latN, lonN, nbNoeuds);
+                              latN, lonN, nbNoeuds, couloir);
 
   let depart, amorce = [], longueurAmorce = 0.0;
   if (coeur[departBrut]) {
@@ -146,7 +155,7 @@ export async function genere({
   }
   const indexCoeur = new IndexSpatial(latN, lonN, atteignables);
   const routeurCoeur = new Routeur(construitCSR(coeur, nbNoeuds), aretes,
-                                   latN, lonN, nbNoeuds);
+                                   latN, lonN, nbNoeuds, couloir);
 
   // 4. recherche -----------------------------------------------------------
   if (arrivee) {
@@ -161,6 +170,9 @@ export async function genere({
   const budget = Math.max(cibleM - 2 * longueurAmorce, cibleM * 0.3);
   journal(`4/5 Recherche de la boucle (${caps} orientations x ${sommets.length} formes)`);
   let meilleur = null;
+  // On garde une petite liste de reserve : si le meilleur candidat se revele
+  // doubler une portion, on prend le suivant plutot que de le servir tel quel.
+  const reserve = [];
 
   for (let indexCap = 0; indexCap < caps; indexCap++) {
     const cap = indexCap * 360.0 / caps;
@@ -175,6 +187,7 @@ export async function genere({
       ligne += `  ${nbSommets}s: ${km(longueur + 2 * longueurAmorce)}km/`
              + `${(part * 100).toFixed(0)}%`;
       if (part > repetitionMax) continue;
+      reserve.push(essai);
       if (meilleur === null || compareNote(note, meilleur[0]) < 0) meilleur = essai;
     }
     journal(ligne);
@@ -198,7 +211,33 @@ export async function genere({
           + `${avant[0][3].toFixed(2)} -> ${meilleur[0][3].toFixed(2)} par km`);
   }
 
+  // Derniere verification, sur la geometrie et non sur le graphe : un aller
+  // par la rue et un retour par le trottoir d'a cote restent deux aretes
+  // distinctes, donc invisibles pour tout comptage base sur les identifiants.
+  // Ce controle ne suppose rien de la cause, il regarde le dessin obtenu.
+  const seuilDoublement = Math.max(30, cibleM * 0.005);
+  const pointsDe = (essai) =>
+    allege(polyligneDuTrajet(essai[3], aretes).map((n) => [latN[n], lonN[n]]), maxPoints);
+
+  reserve.sort((a, b) => compareNote(a[0], b[0]));
+  const candidats = [meilleur, ...reserve.filter((c) => c !== meilleur)].slice(0, 10);
+  let choisi = null, doublement = null;
+  for (const candidat of candidats) {
+    const mesure = mesureDoublement(pointsDe(candidat));
+    if (choisi === null) { choisi = candidat; doublement = mesure; }
+    if (mesure.longueur <= seuilDoublement) { choisi = candidat; doublement = mesure; break; }
+  }
+
+  if (doublement.longueur > seuilDoublement) {
+    journal(`  aucune boucle sans portion doublee a cette distance : la meilleure `
+          + `longe ${doublement.longueur.toFixed(0)} m d'elle-meme`);
+  } else if (choisi !== meilleur) {
+    journal("  la meilleure boucle doublait une portion : candidat suivant retenu");
+  }
+  meilleur = choisi;
+
   const [, longueur, repetee, trajet, nbSommets, cap] = meilleur;
+
 
   // 5. assemblage du trace -------------------------------------------------
   let noeuds = [];
@@ -216,7 +255,9 @@ export async function genere({
 
   const points = allege(noeuds.map((n) => [latN[n], lonN[n]]), maxPoints);
   const distance = longueur + 2 * longueurAmorce;
-  journal(`5/5 Trace retenu : ${km(distance)} km, ${repetee.toFixed(0)} m parcourus deux fois`);
+  journal(`5/5 Trace retenu : ${km(distance)} km, ${repetee.toFixed(0)} m parcourus deux fois`
+        + (doublement.longueur > 0
+           ? `, ${doublement.longueur.toFixed(0)} m longeant une autre portion` : ""));
 
   return {
     points, distance, cible: cibleM, repetee,
@@ -226,6 +267,7 @@ export async function genere({
     qualites: repartition(trajet, aretes, "qualite")
       .map(([q, m]) => [LIBELLES_QUALITE[q] || q, m]),
     longueurBoucle: longueur, boucle: true,
+    doublement: doublement.longueur, portionsDoublees: doublement.portions.length,
   };
 }
 
@@ -264,6 +306,7 @@ function traceVersArrivee({
       ligne += `  ${libelle} : ${km(longueur + longueurAmorce + longueurAmorceArrivee)}`
              + ` km / ${(part * 100).toFixed(0)} %`;
       if (part > repetitionMax) continue;
+      reserve.push(essai);
       if (meilleur === null || compareNote(note, meilleur[0]) < 0) meilleur = essai;
     }
     journal(ligne);
