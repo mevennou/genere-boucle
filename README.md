@@ -28,7 +28,7 @@ Hébergé sur GitHub Pages, donc statique : il n'y a aucun serveur de calcul. Le
 
 Le portage JavaScript est environ **neuf fois plus rapide** que la version Python à résultat identique, parce qu'il travaille sur des indices denses et des tableaux typés plutôt que sur des tables de hachage indexées par identifiants OSM, et qu'il réutilise ses tableaux de travail d'un appel d'A\* au suivant.
 
-L'interface s'adapte au téléphone : le panneau devient une feuille que l'on replie d'un geste pour dégager la carte, les commandes de zoom sont placées à l'opposé et dimensionnées pour le pouce, et le parcours généré replie automatiquement la feuille.
+L'interface s'adapte au téléphone : le panneau devient une feuille que l'on replie d'un geste pour dégager la carte, le bouton de génération reste ancré en bas de cette feuille quel que soit le défilement, les commandes de zoom sont placées à l'écart du panneau et dimensionnées pour le pouce, l'échelle et l'attribution remontent au-dessus de la feuille repliée, et le parcours généré replie automatiquement la feuille.
 
 Navigateur requis : un navigateur à jour, les modules ES dans les workers étant nécessaires.
 

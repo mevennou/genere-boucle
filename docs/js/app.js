@@ -61,7 +61,7 @@ L.control.scale({ imperial: false, position: "bottomleft" }).addTo(carte);
 $("zoom-plus").onclick = () => carte.zoomIn();
 $("zoom-moins").onclick = () => carte.zoomOut();
 $("recentrer").onclick = () => {
-  if (trace) return carte.fitBounds(trace.getBounds(), { padding: [40, 40] });
+  if (trace) return carte.fitBounds(trace.getBounds(), margeCarte());
   if (marqueur) return carte.setView(marqueur.getLatLng(), Math.max(carte.getZoom(), 16));
 };
 
@@ -70,7 +70,22 @@ $("recentrer").onclick = () => {
 // mange l'ecran et la carte, qui est l'essentiel, n'a plus de place.
 const panneau = $("panneau");
 const poignee = $("poignee");
-const estMobile = () => window.matchMedia("(max-width: 720px)").matches;
+const estMobile = () => typeof window !== "undefined"
+  && typeof window.matchMedia === "function"
+  && window.matchMedia("(max-width: 720px)").matches;
+
+// La feuille basse recouvre le bas de la carte : sans cela, un cadrage
+// centre place la moitie du parcours derriere elle.
+function margeCarte() {
+  if (!estMobile() || panneau.classList.contains("replie")) {
+    return { padding: [40, 40] };
+  }
+  // Au-dela, il ne resterait plus assez de carte pour cadrer quoi que ce
+  // soit et Leaflet reculerait jusqu'au zoom minimal.
+  const hauteur = Math.min(panneau.offsetHeight || 0,
+                           (window.innerHeight || 0) * 0.45);
+  return { paddingTopLeft: [24, 24], paddingBottomRight: [24, hauteur + 24] };
+}
 
 function replie(actif) {
   panneau.classList.toggle("replie", actif);
@@ -329,7 +344,6 @@ function telecharge(contenu, nomFichier, type) {
 function dessine(r) {
   trace = L.polyline(r.points, { color: "#e8590c", weight: 4.5, opacity: .92 })
            .addTo(carte);
-  carte.fitBounds(trace.getBounds(), { padding: [40, 40] });
 
   // Une fois le parcours trouve, c'est la carte qu'on veut voir : sur
   // telephone la feuille se replie et garde l'essentiel sous les yeux.
@@ -339,6 +353,10 @@ function dessine(r) {
     + (r.repetee < 1 ? ", sans aller-retour" : `, ${Math.round(r.repetee)} m repassés`)
     + doubles;
   if (estMobile()) replie(true);
+
+  // Cadrage apres le repli seulement : la marge a reserver n'est pas la meme
+  // selon que la feuille couvre le bas de la carte ou non.
+  carte.fitBounds(trace.getBounds(), margeCarte());
 
   const km = (m) => (m / 1000).toFixed(2) + " km";
   const pct = (m) => ` (${(m / r.longueurBoucle * 100).toFixed(0)} %)`;
