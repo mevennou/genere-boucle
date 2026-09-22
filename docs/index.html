@@ -16,6 +16,9 @@
     --accent: #1f6feb; --accent-texte: #ffffff; --ok: #0f7b45; --alerte: #b42318;
     --panneau: rgba(255,255,255,.97); --encart: #f6f8fa;
     --voile: rgba(255,255,255,.82); --ombre: 0 8px 28px rgba(0,0,0,.16);
+    --descente-forte: #1d4ed8; --descente: #5d93de; --plat: #aeb5c0;
+    --montee: #dd7563; --montee-forte: #b42318;
+    --crete: #4a5160;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -23,6 +26,11 @@
       --accent: #4c8dff; --accent-texte: #0b1220; --ok: #3ecf8e; --alerte: #ff7b72;
       --panneau: rgba(20,22,26,.97); --encart: #1b1e23;
       --voile: rgba(20,22,26,.82); --ombre: 0 8px 28px rgba(0,0,0,.5);
+      /* Le theme sombre a ses propres teintes : eclaircir celles du theme
+         clair donnerait des aplats delaves sur un fond noir. */
+      --descente-forte: #6aa8ff; --descente: #3f6aa8; --plat: #4a5361;
+      --montee: #a8584c; --montee-forte: #ff7b72;
+      --crete: #aeb6c4;
     }
   }
   * { box-sizing: border-box; }
@@ -178,6 +186,36 @@
   #barre > i { display: block; height: 100%; width: 0; background: var(--accent);
                transition: width .4s ease; }
   #bilan { display: none; margin-top: 12px; }
+
+  /* --- profil altimetrique ---------------------------------------------- */
+  .profil { display: block; width: 100%; height: auto; margin: 6px 0 2px;
+            touch-action: pan-y; }
+  .profil .aire { stroke: none; }
+  .profil .aire.descente-forte { fill: var(--descente-forte); }
+  .profil .aire.descente { fill: var(--descente); }
+  .profil .aire.plat { fill: var(--plat); }
+  .profil .aire.montee { fill: var(--montee); }
+  .profil .aire.montee-forte { fill: var(--montee-forte); }
+  .profil .crete { fill: none; stroke: var(--crete); stroke-width: 1.4;
+                   stroke-linejoin: round; stroke-linecap: round;
+                   paint-order: stroke; }
+  .profil .grille { stroke: var(--bord); stroke-width: 1; }
+  .profil .repere { fill: var(--doux); font-size: 9px;
+                    font-variant-numeric: tabular-nums; }
+  .profil .viseur { stroke: var(--texte); stroke-width: 1; opacity: .5; }
+  .profil .point { fill: var(--crete); stroke: var(--fond); stroke-width: 2; }
+  .lecture { margin: 0; color: var(--doux); font-size: 11.5px;
+             font-variant-numeric: tabular-nums; min-height: 1.4em; }
+  .legende { display: flex; flex-wrap: wrap; gap: 3px 10px;
+             margin: 5px 0 0; padding: 0; list-style: none;
+             color: var(--doux); font-size: 10.5px; }
+  .legende li { display: flex; align-items: center; gap: 4px; }
+  .pastille { width: 9px; height: 9px; border-radius: 2px; flex: 0 0 auto; }
+  .pastille.descente-forte { background: var(--descente-forte); }
+  .pastille.descente { background: var(--descente); }
+  .pastille.plat { background: var(--plat); }
+  .pastille.montee { background: var(--montee); }
+  .pastille.montee-forte { background: var(--montee-forte); }
   #bilan table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   #bilan td { padding: 3px 0; vertical-align: top; }
   #bilan td:first-child { color: var(--doux); padding-right: 10px; }

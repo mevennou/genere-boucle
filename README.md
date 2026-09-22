@@ -32,6 +32,16 @@ Le portage JavaScript est environ **neuf fois plus rapide** que la version Pytho
 
 Les deux implémentations exécutent le même algorithme, et la suite de tests le vérifie au mètre près sur le réseau de référence. Sur un vrai réseau, elles peuvent retenir deux parcours différents de quelques dizaines de mètres : les primitives géométriques diffèrent d'environ 1e-11 degré entre Python et JavaScript, ce qui suffit à départager autrement deux candidats que la notation sépare à peine. Les deux tracés satisfont alors les mêmes contrôles ; ce n'est pas un désaccord sur la règle, seulement sur l'ex aequo.
 
+### Le relief
+
+Le parcours s'accompagne de son dénivelé positif et négatif, et d'un profil altimétrique dont l'aire est colorée par la pente : deux teintes froides pour la descente, un gris neutre pour le plat, deux teintes chaudes pour la montée. Chaque classe est nommée en légende — la couleur seule ne dit jamais l'identité — et le survol donne distance, altitude et pente au point visé. Le thème sombre a ses propres teintes plutôt qu'un éclaircissement automatique de celles du thème clair.
+
+L'altitude ne vient pas d'un service d'altitude, qui recevrait la liste des points du parcours, donc le tracé lui-même. Elle vient de **tuiles de modèle numérique de terrain** au format Terrarium : des images ordinaires où l'altitude est encodée dans les canaux de couleur. Une tuile couvre plusieurs kilomètres carrés et ne dit rien de ce qu'on y lit ; le serveur ne reçoit que des numéros de tuiles. Le décodage et le calcul se font dans le navigateur, comme le reste.
+
+Le dénivelé ne s'obtient pas en additionnant les différences d'altitude : un modèle de terrain se trompe de quelques mètres à la verticale à chaque point, et cette somme naïve rend deux cent soixante mètres de dénivelé sur dix kilomètres de plat. Une montée n'est donc comptée qu'à partir du moment où elle dépasse trois mètres depuis le dernier point de référence — ce que font les montres. Le prix est borné : au plus trois mètres par versant réel. La pente affichée, elle, se mesure sur cent cinquante mètres, la longueur à laquelle un coureur la ressent, et non sur un pas d'échantillonnage où le bruit la ferait changer de classe tous les vingt-cinq mètres.
+
+La génération des parcours n'est pas touchée : le relief se lit sur le tracé une fois qu'il est trouvé. Le script Python, qui ne dessine pas de graphique, est donc inchangé.
+
 L'interface s'adapte au téléphone : le panneau devient une feuille que l'on replie d'un geste pour dégager la carte, le bouton de génération reste ancré en bas de cette feuille quel que soit le défilement, les commandes de zoom sont placées à l'écart du panneau et dimensionnées pour le pouce, l'échelle et l'attribution remontent au-dessus de la feuille repliée, et le parcours généré replie automatiquement la feuille.
 
 Navigateur requis : un navigateur à jour, les modules ES dans les workers étant nécessaires.

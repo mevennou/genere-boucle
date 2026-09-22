@@ -119,10 +119,22 @@ informations.</p>
       <td>Adresse IP, zone consultée</td></tr>
   <tr><td>Nominatim (OpenStreetMap)</td><td>Recherche d'adresse, si utilisée</td>
       <td>Adresse IP, texte saisi</td></tr>
+  <tr><td>Tuiles de relief Terrarium (AWS Open Data)</td>
+      <td>Profil altimétrique du parcours</td>
+      <td>Adresse IP, numéros des tuiles couvrant la zone</td></tr>
 </table>
 
 <p>Certains de ces services sont situés hors de l'Union européenne. Leurs
 politiques de confidentialité respectives s'appliquent à ces traitements.</p>
+
+<h3>Altitude du parcours</h3>
+<p>Le profil altimétrique n'est pas calculé par un service d'altitude : un tel
+service recevrait la liste des points du parcours, donc le tracé lui-même. Le
+site télécharge à la place des tuiles de modèle numérique de terrain, images
+couvrant chacune plusieurs kilomètres carrés, et lit l'altitude dedans sur ton
+appareil. Le serveur ne reçoit donc que des numéros de tuiles, jamais le
+parcours. Ces tuiles sont distribuées par le programme Open Data d'Amazon Web
+Services, hébergé aux États-Unis.</p>
 
 <h3>Position du point de départ</h3>
 <p>Le point de départ que tu poses sur la carte n'est jamais transmis à

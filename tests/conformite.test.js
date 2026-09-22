@@ -50,6 +50,58 @@ test("pas de couche satellite sous licence commerciale", () => {
   }
 });
 
+test("les seuls appels externes sont ceux qui sont declares", () => {
+  // Chaque domaine appele par le site est un tiers de plus a declarer dans les
+  // mentions legales. En ajouter un doit etre un geste conscient : ce test
+  // echoue tant que le nouveau domaine n'est pas dans les deux listes.
+  const attendus = [
+    "tile.openstreetmap.org", "tile.openstreetmap.fr", "tile.opentopomap.org",
+    "overpass.openstreetmap.fr", "overpass.kumi.systems", "overpass-api.de",
+    "nominatim.openstreetmap.org", "s3.amazonaws.com",
+    "www.openstreetmap.org", "github.com",
+  ];
+  // Tout ce qui ressemble a une adresse n'est pas un appel : un espace de
+  // noms XML et une URL de licence sont des identifiants, ecrits dans un
+  // fichier GPX ou dans un lien, jamais demandes par le navigateur.
+  const identifiants = ["www.topografix.com", "www.w3.org",
+                        "opendatacommons.org", "creativecommons.org"];
+  const trouves = new Set();
+  for (const source of [toutLeJS, html]) {
+    for (const m of source.matchAll(/https?:\/\/([a-z0-9.-]+\.[a-z]{2,})/gi)) {
+      const hote = m[1].toLowerCase();
+      if (!identifiants.includes(hote)) trouves.add(hote);
+    }
+  }
+  for (const hote of trouves) {
+    assert.ok(attendus.includes(hote),
+      `appel a ${hote} : domaine non declare. L'ajouter ici et dans les `
+      + "mentions legales, ou le retirer");
+  }
+
+  // Et la page de mentions legales nomme bien chaque service appele.
+  const legales = lit("mentions-legales.html");
+  for (const service of ["Overpass", "Nominatim", "tuiles", "Terrarium"]) {
+    assert.ok(legales.includes(service), `${service} absent des mentions legales`);
+  }
+});
+
+test("le relief se lit sans confier le parcours a personne", () => {
+  // Un service d'altitude recevrait la liste des points, donc le trace. Les
+  // tuiles, elles, ne disent rien de ce qu'on y lit : c'est la raison du
+  // choix, et elle doit le rester.
+  const altitude = lit(join("js", "altitude.js"));
+  assert.ok(/elevation-tiles-prod\/terrarium/.test(altitude),
+    "le relief doit venir de tuiles de terrain");
+  for (const service of ["open-elevation", "opentopodata", "open-meteo",
+                         "googleapis", "elevation/json"]) {
+    assert.ok(!toutLeJS.includes(service),
+      `${service} : un service d'altitude recevrait le parcours entier`);
+  }
+  // Les coordonnees du parcours ne doivent jamais partir dans une URL.
+  assert.ok(!/latitude=|locations=|\?.*\blat=/.test(altitude),
+    "aucune coordonnee ne doit figurer dans une requete de relief");
+});
+
 test("aucun traceur ni mesure d'audience", () => {
   const mouchards = ["google-analytics", "googletagmanager", "gtag(", "plausible",
                      "matomo", "hotjar", "facebook.net", "doubleclick",

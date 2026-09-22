@@ -2,6 +2,8 @@
 // pendant la generation.
 
 import { chercheAdresse } from "./overpass.js";
+import { profil, classePente } from "./altitude.js";
+import { svgProfil, legendePentes, indiceEn, positionDe } from "./graphique.js";
 
 const $ = (id) => document.getElementById(id);
 const bouton = $("btn-generer");
@@ -378,6 +380,9 @@ function dessine(r) {
               ? `${r.nbBouclettes} (${Math.round(r.bouclettes)} m)` : "aucune"}</td></tr>`;
   html += "</table>";
 
+  html += '<div class="titre-bloc">Relief</div>'
+        + '<div id="relief"><p class="aide">Lecture du relief…</p></div>';
+
   html += '<div class="titre-bloc">Praticabilité vérifiée</div><table>';
   r.qualites.forEach(([q, m]) => {
     html += `<tr><td>${q}</td><td>${km(m)}${pct(m)}</td></tr>`;
@@ -410,6 +415,87 @@ function dessine(r) {
     telecharge(r.gpx, `${nomFichier}.gpx`, "application/gpx+xml");
   $("btn-geojson").onclick = () =>
     telecharge(r.geojson, `${nomFichier}.geojson`, "application/geo+json");
+
+  afficheRelief(r);
+}
+
+// --- relief ---------------------------------------------------------------
+// Le profil arrive apres le parcours : il demande quelques tuiles de modele
+// numerique de terrain. Le trace, lui, est deja a l'ecran et n'attend pas.
+let jetonRelief = 0;
+
+async function afficheRelief(r) {
+  const jeton = ++jetonRelief;
+  let mesure = null;
+  try {
+    mesure = await profil(r.points);
+  } catch (e) { mesure = null; }
+  if (jeton !== jetonRelief) return;          // un autre parcours a pris la main
+  const zone = $("relief");
+  if (!zone) return;
+
+  if (!mesure) {
+    zone.innerHTML = '<p class="aide">Relief indisponible pour cette zone. '
+                   + 'Le parcours reste valable, seul le profil manque.</p>';
+    return;
+  }
+
+  const denivele = `<table><tr><td>Dénivelé positif</td>`
+    + `<td><b>+${Math.round(mesure.montee)} m</b></td></tr>`
+    + `<tr><td>Dénivelé négatif</td><td>−${Math.round(mesure.descente)} m</td></tr>`
+    + `<tr><td>Altitude</td><td>${Math.round(mesure.mini)} à `
+    + `${Math.round(mesure.maxi)} m</td></tr></table>`;
+
+  zone.innerHTML = denivele
+    + svgProfil(mesure, { titre: `Profil du parcours, ${Math.round(mesure.montee)} m `
+                                 + `de dénivelé positif` })
+    + '<p class="lecture" id="lecture-profil"></p>'
+    + legendePentes();
+
+  cableSurvol(zone, mesure);
+}
+
+/**
+ * Survol du profil : un viseur, un point, et une ligne de lecture sous le
+ * graphique. Une infobulle flottante serait rognee par un panneau de trois
+ * cents pixels de large, et illisible au doigt.
+ */
+function cableSurvol(zone, mesure) {
+  const svg = zone.querySelector("svg.profil");
+  const lecture = $("lecture-profil");
+  if (!svg || !lecture) return;
+  const viseur = svg.querySelector(".viseur");
+  const point = svg.querySelector(".point");
+
+  const resume = () => {
+    lecture.textContent = `${(mesure.longueur / 1000).toFixed(2)} km, `
+      + `+${Math.round(mesure.montee)} m / −${Math.round(mesure.descente)} m`;
+    viseur.setAttribute("hidden", "");
+    point.setAttribute("hidden", "");
+  };
+
+  const montre = (evenement) => {
+    const cadre = svg.getBoundingClientRect();
+    if (!cadre.width) return;
+    const x = (evenement.clientX - cadre.left) / cadre.width * 320;
+    const i = indiceEn(x, mesure);
+    if (i < 0) return resume();
+    const [cx, cy] = positionDe(i, mesure);
+    viseur.setAttribute("x1", cx); viseur.setAttribute("x2", cx);
+    viseur.removeAttribute("hidden");
+    point.setAttribute("cx", cx); point.setAttribute("cy", cy);
+    point.removeAttribute("hidden");
+    const pente = mesure.pentes[Math.min(i, mesure.pentes.length - 1)] || 0;
+    lecture.textContent = `${(mesure.distances[i] / 1000).toFixed(2)} km · `
+      + `${Math.round(mesure.altitudes[i])} m · `
+      + `${pente >= 0 ? "+" : "−"}${Math.abs(pente).toFixed(1)} % `
+      + `(${classePente(pente).libelle})`;
+  };
+
+  svg.addEventListener("pointermove", montre);
+  svg.addEventListener("pointerdown", montre);
+  svg.addEventListener("pointerleave", resume);
+  resume();
 }
 
 majCoord(false);
