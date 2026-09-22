@@ -846,7 +846,108 @@ def longueur_trajet(trajet, aretes):
     return sum(aretes[index][2] for index, _ in trajet)
 
 
-def _assemble(adjacence, aretes, coords, etapes, couloirs):
+# Ce qui separe un lacet de la forme meme du parcours : au-dela d'un quart de
+# la distance visee, la boucle n'est plus un crochet a supprimer mais une part
+# du dessin. C'est la borne que retient aussi mesure_bouclettes, et il faut
+# l'appliquer a tout effacement : effacer les lacets d'une marche fermee sans
+# borne la reduirait a rien, puisqu'une boucle est, par construction, une
+# marche qui revient sur elle-meme.
+PART_LACET = 0.25
+
+
+def efface_boucles(trajet, aretes, coords, depart, ferme, cible_m, seuil=25.0):
+    """Efface les boucles du parcours : effacement de lacets sur la marche.
+
+    Un parcours qui repasse par un noeud deja visite contient, entre les deux
+    passages, une boucle fermee — le crochet qui fait le tour d'un pate de
+    maisons et revient au meme carrefour. La retirer laisse une marche valide
+    entre les memes extremites, simplement plus courte : la dichotomie sur le
+    rayon rattrape la distance en elargissant, ce qui est precisement la facon
+    dont ce programme veut allonger un parcours.
+
+    Une boucle peut aussi se refermer a quelques metres sans repasser par le
+    meme noeud, quand l'aller et le retour empruntent deux voies voisines : on
+    la coupe aussi, mais seulement si elle a la taille d'un lacet.
+
+    La fermeture d'une boucle est le but recherche, pas un lacet : le dernier
+    retour au depart est donc epargne.
+    """
+    lacet_max = cible_m * PART_LACET
+    pile = []
+    cumul = [0.0]
+    position = {depart: 0}
+    atteints = {0: depart}
+    case = max(10.0, seuil)
+    cases = {}
+
+    def case_de(noeud):
+        lat, lon = coords[noeud]
+        return (math.floor(lat * 111320 / case),
+                math.floor(lon * 111320 * math.cos(math.radians(lat)) / case))
+
+    def enregistre(noeud, rang):
+        position[noeud] = rang
+        atteints[rang] = noeud
+        cases.setdefault(case_de(noeud), []).append(rang)
+
+    def oublie(rang):
+        for noeud in [n for n, p in position.items() if p > rang]:
+            del position[noeud]
+        for liste in cases.values():
+            liste[:] = [p for p in liste if p <= rang]
+        del pile[rang:]
+        del cumul[rang + 1:]
+
+    enregistre(depart, 0)
+
+    for k, (index, depuis) in enumerate(trajet):
+        arete = aretes[index]
+        vers = arete[1] if depuis == arete[0] else arete[0]
+        pile.append(trajet[k])
+        cumul.append(cumul[-1] + arete[2])
+        if ferme and k == len(trajet) - 1:
+            break
+
+        def lacet(rang):
+            # Le depart est le seul point qu'une boucle a le droit de revoir :
+            # y revenir en cours de route n'autorise pas a jeter tout ce qui
+            # precede, sans quoi il ne resterait rien.
+            if ferme and rang == 0:
+                return False
+            parcouru = cumul[-1] - cumul[rang]
+            return 60.0 <= parcouru <= lacet_max
+
+        # Retour exact sur un noeud deja visite : la boucle est sans ambiguite.
+        if vers in position:
+            if lacet(position[vers]):
+                oublie(position[vers])
+            else:
+                enregistre(vers, len(pile))
+            continue
+
+        # Sinon, retour a quelques metres d'un point deja atteint : l'aller et
+        # le retour ont emprunte deux voies voisines sans partager de noeud.
+        ci, cj = case_de(vers)
+        candidat = -1
+        vlat, vlon = coords[vers]
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                for rang in cases.get((ci + di, cj + dj), ()):
+                    if rang <= candidat or not lacet(rang):
+                        continue
+                    alat, alon = coords[atteints[rang]]
+                    if distance_haversine(vlat, vlon, alat, alon) > seuil:
+                        continue
+                    candidat = rang
+        if candidat >= 0:
+            oublie(candidat)
+            continue
+
+        enregistre(vers, len(pile))
+    return pile
+
+
+def _assemble(adjacence, aretes, coords, etapes, couloirs, cible_m):
     """Enchaine les troncons en penalisant les couloirs deja empruntes.
 
     Renvoie (longueur, repetee, trajet) ou None. La repetition se compte par
@@ -855,9 +956,8 @@ def _assemble(adjacence, aretes, coords, etapes, couloirs):
     seul passage reste du au couloir, le reste est compte comme repete ; sans
     jumelle, la formule redonne exactement longueur x (n - 1), comme avant.
     """
-    utilisees = {}
     penalises = set()
-    trajet_total = []
+    trajet_brut = []
     for a, b in zip(etapes, etapes[1:]):
         if a == b:
             continue
@@ -867,12 +967,20 @@ def _assemble(adjacence, aretes, coords, etapes, couloirs):
             return None
         _, trajet = resultat
         for index, _ in trajet:
-            utilisees[index] = utilisees.get(index, 0) + 1
             penalises.add(couloirs.couloir[index] if couloirs else index)
-        trajet_total.extend(trajet)
+        trajet_brut.extend(trajet)
 
+    ferme = etapes[0] == etapes[-1]
+    trajet_total = efface_boucles(trajet_brut, aretes, coords, etapes[0], ferme,
+                                  cible_m)
     if not trajet_total:
         return None
+
+    # Les comptes se refont sur le trajet net : ce qui a ete efface n'a pas
+    # ete parcouru, et ne doit compter ni comme repetition ni comme longueur.
+    utilisees = {}
+    for index, _ in trajet_total:
+        utilisees[index] = utilisees.get(index, 0) + 1
     longueur = longueur_trajet(trajet_total, aretes)
 
     par_couloir = {}
@@ -887,7 +995,8 @@ def _assemble(adjacence, aretes, coords, etapes, couloirs):
 
 
 def construit_boucle(adjacence, aretes, coords, index_spatial, depart,
-                     lat, lon, rayon, cap, sommets, couloirs=None):
+                     lat, lon, rayon, cap, sommets, couloirs=None,
+                     cible_m=None):
     """Boucle passant par `sommets` ancres reparties en couronne autour du
     depart. Chaque troncon evite les aretes deja utilisees."""
     ancres = []
@@ -903,7 +1012,7 @@ def construit_boucle(adjacence, aretes, coords, index_spatial, depart,
         return None
 
     etapes = [depart] + ancres + [depart]
-    return _assemble(adjacence, aretes, coords, etapes, couloirs)
+    return _assemble(adjacence, aretes, coords, etapes, couloirs, cible_m)
 
 
 def virages_serres(trajet, aretes, coords, longueur):
@@ -958,7 +1067,8 @@ def points_intermediaires(depart_ll, arrivee_ll, hauteur, nombre):
 
 
 def construit_trajet(adjacence, aretes, coords, index_spatial, depart, arrivee,
-                     depart_ll, arrivee_ll, hauteur, nombre, couloirs=None):
+                     depart_ll, arrivee_ll, hauteur, nombre, couloirs=None,
+                     cible_m=None):
     """Trajet depart -> arrivee passant par un arc de `nombre` points."""
     etapes = [depart]
     for cible_lat, cible_lon in points_intermediaires(depart_ll, arrivee_ll,
@@ -968,7 +1078,7 @@ def construit_trajet(adjacence, aretes, coords, index_spatial, depart, arrivee,
         if noeud is not None and noeud not in etapes:
             etapes.append(noeud)
     etapes.append(arrivee)
-    return _assemble(adjacence, aretes, coords, etapes, couloirs)
+    return _assemble(adjacence, aretes, coords, etapes, couloirs, cible_m)
 
 
 def cherche_trajet(adjacence, aretes, coords, index_spatial, depart, arrivee,
@@ -986,7 +1096,7 @@ def cherche_trajet(adjacence, aretes, coords, index_spatial, depart, arrivee,
         hauteur = (bas + haut) / 2.0
         essai = construit_trajet(adjacence, aretes, coords, index_spatial,
                                  depart, arrivee, depart_ll, arrivee_ll,
-                                 hauteur * cote, nombre, couloirs)
+                                 hauteur * cote, nombre, couloirs, cible_m)
         if essai is None:
             haut = hauteur
             continue
@@ -1016,7 +1126,8 @@ def affine_trajet(adjacence, aretes, coords, index_spatial, depart, arrivee,
     for facteur in (0.84, 0.88, 0.92, 0.96, 1.04, 1.08, 1.12, 1.16):
         essai = construit_trajet(adjacence, aretes, coords, index_spatial,
                                  depart, arrivee, depart_ll, arrivee_ll,
-                                 hauteur * facteur * cote, nombre, couloirs)
+                                 hauteur * facteur * cote, nombre, couloirs,
+                                 cible_m)
         if essai is None:
             continue
         longueur, repetee, trajet = essai
@@ -1062,7 +1173,7 @@ def cherche_boucle(adjacence, aretes, coords, index_spatial, depart, lat, lon,
         rayon = (bas + haut) / 2.0
         essai = construit_boucle(adjacence, aretes, coords, index_spatial,
                                  depart, lat, lon, rayon, cap, sommets,
-                                 couloirs)
+                                 couloirs, cible_m)
         if essai is None:
             haut = rayon
             continue
@@ -1102,7 +1213,7 @@ def affine_boucle(adjacence, aretes, coords, index_spatial, depart, lat, lon,
             essai = construit_boucle(adjacence, aretes, coords, index_spatial,
                                      depart, lat, lon, rayon * facteur,
                                      (cap + decalage) % 360.0, sommets,
-                                     couloirs)
+                                     couloirs, cible_m)
             if essai is None:
                 continue
             longueur, repetee, trajet = essai
@@ -1134,7 +1245,7 @@ MARGE_REPLI = 0.20          # ce qu'un repli a le droit de couter en distance
 # Combien de candidats le controle geometrique examine, du meilleur au moins
 # bon. Les traces sans defaut ne sont pas forcement les mieux classes sur la
 # distance : en regarder une poignee ne suffisait pas a en trouver un.
-CANDIDATS_EXAMINES = 48
+CANDIDATS_EXAMINES = 120
 
 # Nombre de points de passage essayes pour un parcours d'un point a un autre.
 # Au-dela de quatre, l'arc se plie assez pour tenir une longue distance entre

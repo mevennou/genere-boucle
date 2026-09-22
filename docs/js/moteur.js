@@ -32,7 +32,7 @@ export const MARGE_REPLI = 0.20;
 // Combien de candidats le controle geometrique examine, du meilleur au moins
 // bon. Les traces sans defaut ne sont pas forcement les mieux classes sur la
 // distance : en regarder une poignee ne suffisait pas a en trouver un.
-const CANDIDATS_EXAMINES = 48;
+const CANDIDATS_EXAMINES = 120;
 
 // Nombre de points de passage essayes pour un parcours d'un point a un autre.
 // Au-dela de quatre, l'arc se plie assez pour tenir une longue distance entre

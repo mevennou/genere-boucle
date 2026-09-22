@@ -76,7 +76,7 @@ export function compareNote(a, b) {
 
 /** Boucle passant par `sommets` ancres reparties en couronne autour du depart. */
 export function construitBoucle(routeur, aretes, indexSpatial, depart, lat, lon,
-                                rayon, cap, sommets) {
+                                rayon, cap, sommets, cibleM) {
   const ancres = [];
   for (let i = 0; i < sommets; i++) {
     const angle = moduloPositif(cap + i * 360.0 / sommets, 360);
@@ -89,17 +89,122 @@ export function construitBoucle(routeur, aretes, indexSpatial, depart, lat, lon,
   if (ancres.length < 2) return null;
 
   const etapes = [depart, ...ancres, depart];
-  return assemble(routeur, etapes);
+  return assemble(routeur, etapes, cibleM);
+}
+
+/**
+ * Efface les boucles du parcours : effacement de lacets sur la marche obtenue.
+ *
+ * Un parcours qui repasse par un noeud deja visite contient, entre les deux
+ * passages, une boucle fermee — le crochet qui fait le tour d'un pate de
+ * maisons et revient au meme carrefour. La retirer laisse une marche valide
+ * entre les memes extremites, simplement plus courte : la dichotomie sur le
+ * rayon rattrape la distance en elargissant, ce qui est precisement la facon
+ * dont ce programme veut allonger un parcours.
+ *
+ * La fermeture d'une boucle est le but recherche, pas un lacet : le dernier
+ * retour au depart est donc epargne. Un retour au depart en cours de route,
+ * lui, est bien une boucle de trop et disparait.
+ */
+// Ce qui separe un lacet de la forme meme du parcours : au-dela d'un quart
+// de la distance visee, la boucle n'est plus un crochet a supprimer mais une
+// part du dessin. C'est la borne que retient aussi mesureBouclettes, et il
+// faut l'appliquer a tout effacement : effacer les lacets d'une marche fermee
+// sans borne la reduirait a rien, puisqu'une boucle est, par construction,
+// une marche qui revient sur elle-meme.
+export const PART_LACET = 0.25;
+
+export function effaceBoucles(trajet, aretes, lat, lon, depart, ferme, cibleM,
+                              seuil = 25) {
+  const lacetMax = cibleM * PART_LACET;
+  const pile = [];
+  const cumul = [0];                       // longueur parcourue a chaque etape
+  const position = new Map([[depart, 0]]); // noeud -> rang dans la pile
+  // Grille spatiale sur les points deja atteints : une boucle peut se
+  // refermer a quelques metres sans repasser par le meme noeud, quand l'aller
+  // et le retour empruntent deux voies voisines.
+  const CASE = Math.max(10, seuil);
+  const cases = new Map();
+  const clef = (i, j) => i * 1000003 + j;
+  const caseDe = (n) => [
+    Math.floor(lat[n] * 111320 / CASE),
+    Math.floor(lon[n] * 111320 * Math.cos(lat[n] * Math.PI / 180) / CASE),
+  ];
+  const atteints = [depart];               // noeud atteint a chaque rang
+  const enregistre = (noeud, rang) => {
+    position.set(noeud, rang);
+    atteints[rang] = noeud;
+    const [ci, cj] = caseDe(noeud);
+    const c = clef(ci, cj);
+    const liste = cases.get(c);
+    if (liste) liste.push(rang); else cases.set(c, [rang]);
+  };
+  enregistre(depart, 0);
+
+  const oublie = (rang) => {
+    for (const [noeud, p] of position) if (p > rang) position.delete(noeud);
+    for (const liste of cases.values()) {
+      let ecrit = 0;
+      for (const p of liste) if (p <= rang) liste[ecrit++] = p;
+      liste.length = ecrit;
+    }
+    pile.length = rang;
+    cumul.length = rang + 1;
+  };
+
+  for (let k = 0; k < trajet.length; k++) {
+    const [index, depuis] = trajet[k];
+    const arete = aretes[index];
+    const vers = depuis === arete.u ? arete.v : arete.u;
+    pile.push(trajet[k]);
+    cumul.push(cumul[cumul.length - 1] + arete.longueur);
+    if (ferme && k === trajet.length - 1) break;
+
+    const lacet = (rang) => {
+      // Le depart est le seul point qu'une boucle a le droit de revoir :
+      // y revenir en cours de route n'autorise pas a jeter tout ce qui
+      // precede, sans quoi il ne resterait rien.
+      if (ferme && rang === 0) return false;
+      const parcouru = cumul[cumul.length - 1] - cumul[rang];
+      return parcouru >= 60 && parcouru <= lacetMax;
+    };
+
+    // Retour exact sur un noeud deja visite : la boucle est sans ambiguite.
+    const connu = position.get(vers);
+    if (connu !== undefined) {
+      if (lacet(connu)) { oublie(connu); continue; }
+      enregistre(vers, pile.length);
+      continue;
+    }
+
+    // Sinon, retour a quelques metres d'un point deja atteint : l'aller et le
+    // retour ont emprunte deux voies voisines sans partager de noeud.
+    const [ci, cj] = caseDe(vers);
+    let candidat = -1;
+    for (let di = -1; di <= 1; di++) {
+      for (let dj = -1; dj <= 1; dj++) {
+        for (const rang of (cases.get(clef(ci + di, cj + dj)) || [])) {
+          if (rang <= candidat || !lacet(rang)) continue;
+          if (distanceHaversine(lat[vers], lon[vers],
+                                lat[atteints[rang]], lon[atteints[rang]]) > seuil) continue;
+          candidat = rang;
+        }
+      }
+    }
+    if (candidat >= 0) { oublie(candidat); continue; }
+
+    enregistre(vers, pile.length);
+  }
+  return pile;
 }
 
 /**
  * Enchaine les troncons en penalisant au fur et a mesure les aretes deja
  * empruntees. Renvoie [longueur, repetee, trajet] ou null.
  */
-function assemble(routeur, etapes) {
+function assemble(routeur, etapes, cibleM) {
   routeur.nouvellesPenalites();
-  const comptes = new Map();
-  const trajetTotal = [];
+  const trajetBrut = [];
 
   for (let k = 0; k + 1 < etapes.length; k++) {
     const a = etapes[k], b = etapes[k + 1];
@@ -107,14 +212,20 @@ function assemble(routeur, etapes) {
     const resultat = routeur.plusCourtChemin(a, b);
     if (resultat === null) return null;
     for (const pas of resultat[1]) {
-      const index = pas[0];
-      comptes.set(index, (comptes.get(index) || 0) + 1);
-      routeur.penalise(index);
-      trajetTotal.push(pas);
+      routeur.penalise(pas[0]);
+      trajetBrut.push(pas);
     }
   }
 
+  const ferme = etapes[0] === etapes[etapes.length - 1];
+  const trajetTotal = effaceBoucles(trajetBrut, routeur.aretes, routeur.lat,
+                                    routeur.lon, etapes[0], ferme, cibleM);
   if (!trajetTotal.length) return null;
+
+  // Les comptes se refont sur le trajet net : ce qui a ete efface n'a pas ete
+  // parcouru, et ne doit donc compter ni comme repetition ni comme longueur.
+  const comptes = new Map();
+  for (const [index] of trajetTotal) comptes.set(index, (comptes.get(index) || 0) + 1);
   const longueur = routeur.longueurTrajet(trajetTotal);
 
   // Repetition comptee par couloir et non par arete : aller par la rue et
@@ -151,7 +262,7 @@ export function chercheBoucle(routeur, aretes, lat, lon, indexSpatial, depart,
   for (let i = 0; i < iterations; i++) {
     const rayon = (bas + haut) / 2.0;
     const essai = construitBoucle(routeur, aretes, indexSpatial, depart,
-                                  latD, lonD, rayon, cap, sommets);
+                                  latD, lonD, rayon, cap, sommets, cibleM);
     if (essai === null) { haut = rayon; continue; }
     const [longueur, repetee, trajet] = essai;
     const note = noteBoucle(longueur, repetee, cibleM, tolerance,
@@ -177,7 +288,8 @@ export function affineBoucle(routeur, aretes, lat, lon, indexSpatial, depart,
       if (decalage === 0.0 && facteur === 1.0) continue;
       const nouveauCap = moduloPositif(cap + decalage, 360);
       const essai = construitBoucle(routeur, aretes, indexSpatial, depart,
-                                    latD, lonD, rayon * facteur, nouveauCap, sommets);
+                                    latD, lonD, rayon * facteur, nouveauCap,
+                                    sommets, cibleM);
       if (essai === null) continue;
       const [longueur, repetee, trajet] = essai;
       if (longueur && repetee / longueur > repetitionMax) continue;
@@ -211,7 +323,7 @@ export function pointsIntermediaires(departLL, arriveeLL, hauteur, nombre) {
 }
 
 export function construitTrajet(routeur, aretes, indexSpatial, depart, arrivee,
-                                departLL, arriveeLL, hauteur, nombre) {
+                                departLL, arriveeLL, hauteur, nombre, cibleM) {
   const etapes = [depart];
   for (const [cibleLat, cibleLon] of pointsIntermediaires(departLL, arriveeLL, hauteur, nombre)) {
     const [noeud] = indexSpatial.plusProche(cibleLat, cibleLon,
@@ -219,7 +331,7 @@ export function construitTrajet(routeur, aretes, indexSpatial, depart, arrivee,
     if (noeud !== null && !etapes.includes(noeud)) etapes.push(noeud);
   }
   etapes.push(arrivee);
-  return assemble(routeur, etapes);
+  return assemble(routeur, etapes, cibleM);
 }
 
 export function chercheTrajet(routeur, aretes, lat, lon, indexSpatial, depart, arrivee,
@@ -233,7 +345,8 @@ export function chercheTrajet(routeur, aretes, lat, lon, indexSpatial, depart, a
   for (let i = 0; i < iterations; i++) {
     const hauteur = (bas + haut) / 2.0;
     const essai = construitTrajet(routeur, aretes, indexSpatial, depart, arrivee,
-                                  departLL, arriveeLL, hauteur * cote, nombre);
+                                  departLL, arriveeLL, hauteur * cote, nombre,
+                                  cibleM);
     if (essai === null) { haut = hauteur; continue; }
     const [longueur, repetee, trajet] = essai;
     const note = noteBoucle(longueur, repetee, cibleM, tolerance,
@@ -252,7 +365,8 @@ export function affineTrajet(routeur, aretes, lat, lon, indexSpatial, depart, ar
   const nombre = meilleur[4], cote = meilleur[5], hauteur = meilleur[6];
   for (const facteur of [0.84, 0.88, 0.92, 0.96, 1.04, 1.08, 1.12, 1.16]) {
     const essai = construitTrajet(routeur, aretes, indexSpatial, depart, arrivee,
-                                  departLL, arriveeLL, hauteur * facteur * cote, nombre);
+                                  departLL, arriveeLL, hauteur * facteur * cote,
+                                  nombre, cibleM);
     if (essai === null) continue;
     const [longueur, repetee, trajet] = essai;
     if (longueur && repetee / longueur > repetitionMax) continue;
