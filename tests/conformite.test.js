@@ -165,6 +165,32 @@ test("la mise en page mobile respecte les contraintes des telephones", () => {
   assert.ok(html.includes('id="poignee"'), "la feuille doit pouvoir se replier");
 });
 
+test("le worker transmet tout ce que l'interface lit du resultat", () => {
+  // Defaut constate : le moteur mesurait bien les portions longees, mais le
+  // worker ne les recopiait pas dans le message envoye a la page. L'interface
+  // lisait donc r.doublement === undefined et n'en parlait jamais — un
+  // affichage muet, qu'aucun test ne voyait puisque chaque module, pris
+  // separement, faisait son travail.
+  const app = lit(join("js", "app.js"));
+  const worker = lit(join("js", "worker.js"));
+
+  // Champs lus par dessine(r) dans l'interface.
+  const dessine = app.slice(app.indexOf("function dessine(r)"));
+  const lus = new Set([...dessine.matchAll(/\br\.(\w+)/g)].map((m) => m[1]));
+  assert.ok(lus.size >= 10, `seulement ${lus.size} champs lus, extraction douteuse`);
+
+  // Champs recopies par le worker dans le message "fini".
+  const debut = worker.indexOf("resultat: {");
+  assert.ok(debut > 0, "le worker doit construire un objet resultat");
+  const bloc = worker.slice(debut, worker.indexOf("\n      },", debut));
+  const transmis = new Set([...bloc.matchAll(/^\s*(\w+):/gm)].map((m) => m[1]));
+
+  for (const champ of lus) {
+    assert.ok(transmis.has(champ),
+      `l'interface lit r.${champ}, que le worker n'envoie pas`);
+  }
+});
+
 test("le controle anti-doublement est bien branche", () => {
   const moteur = lit(join("js", "moteur.js"));
   assert.ok(moteur.includes("mesureDoublement"), "le controle geometrique doit etre appele");

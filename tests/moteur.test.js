@@ -3,7 +3,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { lecture } from "./utils.js";
-import { genere, BoucleIntrouvable } from "../docs/js/moteur.js";
+import { genere, BoucleIntrouvable, choisitSansDoublement, MARGE_REPLI }
+  from "../docs/js/moteur.js";
+import { reseauCouloir } from "./reseaux.js";
 import { distanceHaversine } from "../docs/js/geo.js";
 import { ecritGPX } from "../docs/js/sortie.js";
 
@@ -259,6 +261,172 @@ test("parcours A vers B : le controle anti-doublement s'applique aussi", async (
     `${r.doublement.toFixed(0)} m doubles sur le parcours`);
   const sommeTypes = r.types.reduce((s, [, m]) => s + m, 0);
   assert.ok(Math.abs(sommeTypes - r.longueurBoucle) < 1, "statistiques incoherentes");
+});
+
+// Traces fabriques pour le controle geometrique : l'un file tout droit,
+// l'autre revient sur ses pas cinq metres a cote.
+const DLAT = (m) => m / 111320;
+const DLON = (m) => m / 111320 / Math.cos(47 * Math.PI / 180);
+
+function ligneDroite(longueur, pas = 20) {
+  const points = [];
+  for (let d = 0; d <= longueur; d += pas) points.push([47, 5 + DLON(d)]);
+  return points;
+}
+
+function allerRetour(longueur, pas = 20) {
+  const moitie = longueur / 2;
+  const points = [];
+  for (let d = 0; d <= moitie; d += pas) points.push([47, 5 + DLON(d)]);
+  for (let d = moitie; d >= 0; d -= pas) points.push([47 + DLAT(5), 5 + DLON(d)]);
+  return points;
+}
+
+test("parcours A vers B : le repli anti-doublement ne brade pas la distance", () => {
+  // Defaut constate en production : 15 km demandes entre deux points, 1,07 km
+  // rendu. Le meilleur candidat longeait une portion de lui-meme, alors le
+  // repli a parcouru la reserve et a fini par retenir le plus court chemin
+  // direct : il ne double rien, puisqu'il ne fait aucun detour.
+  const traces = new Map();
+  const candidat = (longueur, seLonge) => {
+    const c = [[0, 0, 0], longueur, 0];
+    traces.set(c, seLonge ? allerRetour(longueur) : ligneDroite(longueur));
+    return c;
+  };
+  const pointsDe = (c) => traces.get(c);
+
+  const surLaCible = candidat(10000, true);    // pile sur la cible, mais se longe
+  const unPeuCourt = candidat(9400, false);    // 6 % trop court, et propre
+  const direct = candidat(1000, false);        // le plus court chemin, propre
+
+  // Le candidat legerement plus court est un repli raisonnable.
+  const [choisi, mesure] = choisitSansDoublement(
+    surLaCible, [surLaCible, unPeuCourt, direct], 10000, 50, pointsDe, 8);
+  assert.equal(choisi, unPeuCourt,
+    "le repli doit s'arreter au candidat qui tient encore la distance");
+  assert.equal(mesure.longueur, 0);
+
+  // Le chemin direct, lui, ne repond pas a la demande : mieux vaut garder le
+  // meilleur et annoncer le doublement que de rendre dix fois trop court.
+  const [garde, doublement] = choisitSansDoublement(
+    surLaCible, [surLaCible, direct], 10000, 50, pointsDe, 8);
+  assert.equal(garde, surLaCible,
+    "un parcours dix fois trop court n'est pas un repli acceptable");
+  assert.ok(doublement.longueur > 50,
+    "le doublement restant doit etre mesure, donc annoncable");
+});
+
+test("le repli respecte sa marge quelle que soit la reserve", () => {
+  // Balayage systematique plutot qu'un cas choisi : la regle doit tenir pour
+  // n'importe quelle reserve, y compris celles ou tous les candidats longent
+  // une portion d'eux-memes.
+  let graine = 12345;
+  const hasard = () => (graine = (graine * 1103515245 + 12345) % 2147483648) / 2147483648;
+
+  for (let essai = 0; essai < 200; essai++) {
+    const cible = 5000 + Math.floor(hasard() * 15000);
+    const traces = new Map();
+    const fabrique = (longueur, seLonge) => {
+      const c = [[0, 0, 0], longueur, 0];
+      traces.set(c, seLonge ? allerRetour(longueur) : ligneDroite(longueur));
+      return c;
+    };
+    // Une reserve quelconque, du plus court au plus long, et un meilleur
+    // candidat tire au sort parmi elle.
+    const reserve = [];
+    for (let k = 0; k < 8; k++) {
+      reserve.push(fabrique(Math.max(400, Math.round(cible * (0.05 + hasard() * 1.4))),
+                            hasard() < 0.6));
+    }
+    const meilleur = reserve[Math.floor(hasard() * reserve.length)];
+
+    const [choisi] = choisitSansDoublement(meilleur, reserve, cible, 50,
+                                           (c) => traces.get(c), 8);
+    const erreur = (c) => Math.abs(c[1] - cible) / cible;
+    assert.ok(choisi, "un candidat doit toujours etre retenu");
+    assert.ok(erreur(choisi) <= erreur(meilleur) + MARGE_REPLI + 1e-9,
+      `essai ${essai} : repli a ${(erreur(choisi) * 100).toFixed(0)} % alors que le `
+      + `meilleur etait a ${(erreur(meilleur) * 100).toFixed(0)} % de la cible`);
+  }
+});
+
+// --- le parcours rendu vaut-il les candidats trouves ? --------------------
+//
+// C'est l'invariant qui manquait, et qui a laisse passer un 15 km rendu en
+// 1,07 km : le journal annonce la longueur de chaque candidat examine, donc on
+// peut verifier que le parcours retenu n'est pas bien plus loin de la cible
+// que le meilleur d'entre eux. Manquer la distance parce que le reseau ne la
+// permet pas est legitime ; la manquer alors qu'un candidat l'atteignait ne
+// l'est pas.
+
+/** Meilleur ecart relatif a la cible parmi les candidats annonces au journal. */
+function meilleurCandidatAnnonce(lignes, cibleM) {
+  let meilleur = Infinity;
+  for (const ligne of lignes) {
+    // Boucles : "3s: 4.25km/0%" — point a point : "gauche : 4.25 km / 0 %".
+    for (const m of ligne.matchAll(/(\d+\.\d+)\s*km\s*\//g)) {
+      const ecart = Math.abs(parseFloat(m[1]) * 1000 - cibleM) / cibleM;
+      if (ecart < meilleur) meilleur = ecart;
+    }
+  }
+  return meilleur;
+}
+
+async function verifieInvariant(nom, parametres) {
+  const lignes = [];
+  const r = await genere({ iterations: 10, journal: (l) => lignes.push(l), ...parametres });
+  const rendu = Math.abs(r.distance - r.cible) / r.cible;
+  const disponible = meilleurCandidatAnnonce(lignes, r.cible);
+  assert.ok(disponible < Infinity, `${nom} : aucun candidat lu dans le journal`);
+  assert.ok(rendu <= disponible + MARGE_REPLI + 1e-9,
+    `${nom} : parcours rendu a ${(rendu * 100).toFixed(0)} % de la cible alors `
+    + `qu'un candidat etait a ${(disponible * 100).toFixed(0)} %`);
+  return r;
+}
+
+test("le parcours rendu n'est jamais bien plus loin de la cible que le meilleur candidat", async () => {
+  const arrivee = [47.0096 + 0.004, 5.0096 + 0.004];
+  for (const km of [3, 4, 5, 6]) {
+    await verifieInvariant(`reseau.json A->B ${km} km`, {
+      lat: DEPART[0], lon: DEPART[1], arrivee, cibleM: km * 1000, source: sourceLocale(),
+    });
+    await verifieInvariant(`reseau.json boucle ${km} km`, {
+      lat: DEPART[0], lon: DEPART[1], cibleM: km * 1000, source: sourceLocale(),
+    });
+  }
+});
+
+test("meme invariant sur un reseau a trottoirs, ou le repli se declenche", async () => {
+  // Ces reseaux font systematiquement longer une portion au meilleur
+  // candidat : c'est donc le chemin de repli qui est exerce ici, celui-la
+  // meme qui retenait le plus court chemin direct.
+  for (const longueurCouloir of [200, 300]) {
+    const { voies, depart } = reseauCouloir(longueurCouloir);
+    const source = sourceLocale(voies);
+    const arrivee = [depart[1] + 0.003, depart[2] + 0.003];
+    for (const km of [3, 4, 5, 6]) {
+      await verifieInvariant(`couloir ${longueurCouloir} A->B ${km} km`, {
+        lat: depart[1], lon: depart[2], arrivee, cibleM: km * 1000, source,
+      });
+    }
+    await verifieInvariant(`couloir ${longueurCouloir} boucle 8 km`, {
+      lat: depart[1], lon: depart[2], cibleM: 8000, source,
+    });
+  }
+});
+
+test("parcours A vers B de 4 km : le reseau le permet, le moteur doit le tenir", async () => {
+  // Cas precis que l'ancien code ratait : un candidat tombait pile sur les
+  // 4 km, mais il longeait une portion de lui-meme ; le repli descendait
+  // alors jusqu'a un parcours 12 % trop court. Le seul test point a point
+  // existant s'arretait a 3 km, d'ou le trou.
+  const r = await genere({
+    lat: DEPART[0], lon: DEPART[1], arrivee: [47.0096 + 0.004, 5.0096 + 0.004],
+    cibleM: 4000, iterations: 10, source: sourceLocale(),
+  });
+  const ecart = Math.abs(r.distance - 4000) / 4000;
+  assert.ok(ecart < 0.08,
+    `4 km demandes, ${(r.distance / 1000).toFixed(2)} km rendus (${(ecart * 100).toFixed(0)} %)`);
 });
 
 test("parcours A vers B : distance impossible, message clair", async () => {

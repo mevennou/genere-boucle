@@ -22,6 +22,45 @@ export class BoucleIntrouvable extends Error {}
 
 const km = (m) => (m / 1000).toFixed(2);
 
+// Ce qu'un repli anti-doublement a le droit de couter en distance : un
+// dixieme de la distance demandee, pas davantage. Assez pour preferer un
+// parcours un peu plus court a un parcours qui se longe, trop peu pour que le
+// plus court chemin direct — qui ne double rien par construction — devienne
+// une reponse acceptable a « quinze kilometres ».
+export const MARGE_REPLI = 0.10;
+
+/**
+ * Choisit, parmi les candidats classes du meilleur au moins bon, le premier
+ * qui ne longe pas une portion de lui-meme.
+ *
+ * Le repli ne porte que sur des candidats qui tiennent encore la distance.
+ * Sans ce garde-fou, le plus court chemin direct — qui ne double evidemment
+ * rien, puisqu'il ne fait aucun detour — finissait par etre retenu : 15 km
+ * demandes, 1 km rendu. Mieux vaut un parcours qui longe cent metres de
+ * lui-meme, et le dire, qu'un parcours a la bonne allure mais dix fois trop
+ * court.
+ */
+export function choisitSansDoublement(meilleur, reserve, cible, seuil,
+                                      pointsDe, maximum) {
+  const erreurDe = (candidat) => Math.abs(candidat[1] - cible) / cible;
+  // Le repli part de ce que le meilleur atteignait deja : sur un reseau qui
+  // sature, manquer la distance est acceptable, s'en eloigner encore d'un
+  // dixieme de plus ne l'est pas.
+  const erreurMax = erreurDe(meilleur) + MARGE_REPLI;
+  const candidats = [
+    meilleur,
+    ...reserve.filter((c) => c !== meilleur && erreurDe(c) <= erreurMax),
+  ].slice(0, maximum);
+
+  let choisi = null, doublement = null;
+  for (const candidat of candidats) {
+    const mesure = mesureDoublement(pointsDe(candidat));
+    if (choisi === null) { choisi = candidat; doublement = mesure; }
+    if (mesure.longueur <= seuil) { choisi = candidat; doublement = mesure; break; }
+  }
+  return [choisi, doublement];
+}
+
 export async function genere({
   lat, lon, cibleM, niveau = "normal", caps = 16, sommets = [3, 4, 5, 6],
   iterations = 10, tolerance = 0.03, repetitionMax = 0.12, maxPoints = 3000,
@@ -220,13 +259,8 @@ export async function genere({
     allege(polyligneDuTrajet(essai[3], aretes).map((n) => [latN[n], lonN[n]]), maxPoints);
 
   reserve.sort((a, b) => compareNote(a[0], b[0]));
-  const candidats = [meilleur, ...reserve.filter((c) => c !== meilleur)].slice(0, 10);
-  let choisi = null, doublement = null;
-  for (const candidat of candidats) {
-    const mesure = mesureDoublement(pointsDe(candidat));
-    if (choisi === null) { choisi = candidat; doublement = mesure; }
-    if (mesure.longueur <= seuilDoublement) { choisi = candidat; doublement = mesure; break; }
-  }
+  const [choisi, doublement] = choisitSansDoublement(
+    meilleur, reserve, budget, seuilDoublement, pointsDe, 10);
 
   if (doublement.longueur > seuilDoublement) {
     journal(`  aucune boucle sans portion doublee a cette distance : la meilleure `
@@ -331,13 +365,9 @@ function traceVersArrivee({
     allege(polyligneDuTrajet(essai[3], aretes).map((n) => [latN[n], lonN[n]]), maxPoints);
 
   reserve.sort((a, b) => compareNote(a[0], b[0]));
-  const candidats = [meilleur, ...reserve.filter((c) => c !== meilleur)].slice(0, 8);
-  let choisi = null, doublement = null;
-  for (const candidat of candidats) {
-    const mesure = mesureDoublement(pointsDe(candidat));
-    if (choisi === null) { choisi = candidat; doublement = mesure; }
-    if (mesure.longueur <= seuilDoublement) { choisi = candidat; doublement = mesure; break; }
-  }
+  const [choisi, doublement] = choisitSansDoublement(
+    meilleur, reserve, budget, seuilDoublement, pointsDe, 8);
+
   if (doublement.longueur > seuilDoublement) {
     journal(`  aucun parcours sans portion doublee a cette distance : le meilleur `
           + `longe ${doublement.longueur.toFixed(0)} m de lui-meme`);
