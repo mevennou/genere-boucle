@@ -73,13 +73,22 @@ class Tas {
 
 export const PENALITE = 12.0;
 
+// Hors agglomeration, le code de la route francais demande au pieton de
+// circuler pres du bord gauche de la chaussee, face au trafic. La seule
+// occasion ou le graphe peut choisir un bord, c'est quand les deux cotes sont
+// cartographies a part : on rencherit alors le cote droit. Une preference,
+// pas une interdiction — un detour de plusieurs centaines de metres pour
+// changer de trottoir ne vaudrait pas la regle.
+export const SURCOUT_COTE_DROIT = 1.35;
+
 export class Routeur {
   /**
    * @param csr adjacence au format CSR
    * @param aretes tableau d'aretes contractees
    * @param lat,lon coordonnees par indice de noeud
    */
-  constructor(csr, aretes, lat, lon, nbNoeuds, couloir = null) {
+  constructor(csr, aretes, lat, lon, nbNoeuds, couloir = null,
+              decalage = null, alignement = null) {
     this.csr = csr;
     this.aretes = aretes;
     this.lat = lat; this.lon = lon;
@@ -103,6 +112,12 @@ export class Routeur {
     this.couloir = couloir || Int32Array.from({ length: aretes.length }, (_, i) => i);
     this.tamponPenalite = new Int32Array(aretes.length);
     this.passagePenalite = 0;
+
+    // Cote de la chaussee, pour les seules voies jumelees. Ailleurs, le
+    // decalage vaut zero et rien ne change.
+    this.decalage = decalage || new Float64Array(aretes.length);
+    this.alignement = alignement || new Int8Array(aretes.length).fill(1);
+    this.debut = Int32Array.from(aretes, (a) => a.u);
 
     this.tas = new Tas();
   }
@@ -156,6 +171,12 @@ export class Routeur {
         const index = arete[k];
         let poids = this.poids[index];
         if (this.tamponPenalite[this.couloir[index]] === this.passagePenalite) poids *= PENALITE;
+        // Courir a gauche : le sens de parcours decide de quel bord il s'agit.
+        const ecart = this.decalage[index];
+        if (ecart !== 0) {
+          const sens = (noeud === this.debut[index] ? 1 : -1) * this.alignement[index];
+          if (ecart * sens < 0) poids *= SURCOUT_COTE_DROIT;
+        }
         const nouveau = cout + poids;
         if (this.tampon[v] !== passage || nouveau < this.cout[v]) {
           this.cout[v] = nouveau;

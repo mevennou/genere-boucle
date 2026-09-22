@@ -116,3 +116,92 @@ export function mesureDoublement(points, { seuil = 15, ecartChemin = 80 } = {}) 
     portions: retenues,
   };
 }
+
+/**
+ * Petites boucles refermees sur elles-memes a l'interieur du parcours.
+ *
+ * Le comptage par arete et la mesure de doublement ne les voient pas : un
+ * crochet qui part d'un carrefour, fait le tour d'un pate de maisons et
+ * revient au meme carrefour n'emprunte aucune arete deux fois et ne longe
+ * rien. C'est pourtant exactement ce qu'on ne veut pas : un circuit, pas un
+ * circuit plus trois lacets pour faire la distance.
+ *
+ * Une bouclette est un retour du trace a moins de `seuil` metres d'un point
+ * deja visite, apres avoir parcouru entre `minimum` metres et une part
+ * `partMax` du parcours. La borne haute ecarte la fermeture de la boucle
+ * principale, qui est le but recherche et non un defaut.
+ *
+ * Renvoie { nombre, longueur, boucles }, ou `longueur` est le perimetre
+ * cumule des bouclettes trouvees.
+ */
+export function mesureBouclettes(points, { seuil = 25, minimum = 60,
+                                           partMax = 0.25 } = {}) {
+  const n = points.length;
+  if (n < 4) return { nombre: 0, longueur: 0, boucles: [] };
+
+  const cumul = new Float64Array(n);
+  for (let i = 1; i < n; i++) {
+    cumul[i] = cumul[i - 1] + distanceHaversine(points[i - 1][0], points[i - 1][1],
+                                                points[i][0], points[i][1]);
+  }
+  const total = cumul[n - 1];
+  const maximum = total * partMax;
+  if (maximum <= minimum) return { nombre: 0, longueur: 0, boucles: [] };
+
+  // Grille spatiale sur les points, au pas du seuil : deux points voisins
+  // dans le plan se retrouvent dans la meme case ou dans une case adjacente.
+  const CASE = Math.max(10, seuil);
+  const cases = new Map();
+  const clef = (i, j) => i * 1000003 + j;
+  const caseDe = (k) => [
+    Math.floor(points[k][0] * 111320 / CASE),
+    Math.floor(points[k][1] * 111320 * Math.cos(points[k][0] * RAD) / CASE),
+  ];
+  for (let k = 0; k < n; k++) {
+    const [ci, cj] = caseDe(k);
+    const c = clef(ci, cj);
+    const liste = cases.get(c);
+    if (liste) liste.push(k); else cases.set(c, [k]);
+  }
+
+  // Pour chaque point, le retour le plus tardif encore admissible : c'est la
+  // plus grande bouclette qui se referme sur ce point.
+  const intervalles = [];
+  for (let i = 0; i < n; i++) {
+    const [ci, cj] = caseDe(i);
+    let fin = -1;
+    for (let di = -1; di <= 1; di++) {
+      for (let dj = -1; dj <= 1; dj++) {
+        const liste = cases.get(clef(ci + di, cj + dj));
+        if (!liste) continue;
+        for (const j of liste) {
+          if (j <= i || j <= fin) continue;
+          const parcouru = cumul[j] - cumul[i];
+          if (parcouru < minimum || parcouru > maximum) continue;
+          if (distanceHaversine(points[i][0], points[i][1],
+                                points[j][0], points[j][1]) > seuil) continue;
+          fin = j;
+        }
+      }
+    }
+    if (fin > i) intervalles.push([i, fin]);
+  }
+
+  // Deux bouclettes qui se recouvrent sont le meme crochet vu de deux points.
+  const boucles = [];
+  for (const [debut, fin] of intervalles) {
+    const derniere = boucles[boucles.length - 1];
+    if (derniere && debut <= derniere.fin) {
+      if (fin > derniere.fin) derniere.fin = fin;
+    } else {
+      boucles.push({ debut, fin });
+    }
+  }
+  for (const b of boucles) b.longueur = cumul[b.fin] - cumul[b.debut];
+
+  return {
+    nombre: boucles.length,
+    longueur: boucles.reduce((s, b) => s + b.longueur, 0),
+    boucles,
+  };
+}

@@ -142,7 +142,8 @@ function assemble(routeur, etapes) {
  * atteinte en elargissant la boucle, jamais en la faisant zigzaguer.
  */
 export function chercheBoucle(routeur, aretes, lat, lon, indexSpatial, depart,
-                              latD, lonD, cibleM, cap, sommets, iterations, tolerance) {
+                              latD, lonD, cibleM, cap, sommets, iterations,
+                              tolerance, variantes = null) {
   const rayonIdeal = cibleM / (2 * sommets * Math.sin(Math.PI / sommets));
   let bas = rayonIdeal * 0.25, haut = rayonIdeal * 1.60;
   let meilleur = null;
@@ -155,9 +156,12 @@ export function chercheBoucle(routeur, aretes, lat, lon, indexSpatial, depart,
     const [longueur, repetee, trajet] = essai;
     const note = noteBoucle(longueur, repetee, cibleM, tolerance,
                             viragesSerres(trajet, aretes, lat, lon, longueur));
-    if (meilleur === null || compareNote(note, meilleur[0]) < 0) {
-      meilleur = [note, longueur, repetee, trajet, sommets, cap, rayon];
-    }
+    const essaiNote = [note, longueur, repetee, trajet, sommets, cap, rayon];
+    // Toutes les tentatives valides sont conservees, pas seulement la
+    // meilleure : le controle geometrique final a besoin de matiere pour
+    // trouver un trace sans defaut, et la dichotomie en produit dix par forme.
+    if (variantes) variantes.push(essaiNote);
+    if (meilleur === null || compareNote(note, meilleur[0]) < 0) meilleur = essaiNote;
     if (longueur < cibleM) bas = rayon; else haut = rayon;
   }
   return meilleur;
@@ -165,7 +169,8 @@ export function chercheBoucle(routeur, aretes, lat, lon, indexSpatial, depart,
 
 /** Balayage fin d'orientation et de rayon autour de la meilleure boucle. */
 export function affineBoucle(routeur, aretes, lat, lon, indexSpatial, depart,
-                             latD, lonD, cibleM, tolerance, repetitionMax, meilleur) {
+                             latD, lonD, cibleM, tolerance, repetitionMax,
+                             meilleur, variantes = null) {
   const sommets = meilleur[4], cap = meilleur[5], rayon = meilleur[6];
   for (const decalage of [-9.0, -6.0, -3.0, 3.0, 6.0, 9.0, 0.0]) {
     for (const facteur of [0.88, 0.92, 0.96, 1.0, 1.04, 1.08, 1.12]) {
@@ -178,9 +183,10 @@ export function affineBoucle(routeur, aretes, lat, lon, indexSpatial, depart,
       if (longueur && repetee / longueur > repetitionMax) continue;
       const note = noteBoucle(longueur, repetee, cibleM, tolerance,
                               viragesSerres(trajet, aretes, lat, lon, longueur));
-      if (compareNote(note, meilleur[0]) < 0) {
-        meilleur = [note, longueur, repetee, trajet, sommets, nouveauCap, rayon * facteur];
-      }
+      const essaiNote = [note, longueur, repetee, trajet, sommets, nouveauCap,
+                         rayon * facteur];
+      if (variantes) variantes.push(essaiNote);
+      if (compareNote(note, meilleur[0]) < 0) meilleur = essaiNote;
     }
   }
   return meilleur;
@@ -217,7 +223,8 @@ export function construitTrajet(routeur, aretes, indexSpatial, depart, arrivee,
 }
 
 export function chercheTrajet(routeur, aretes, lat, lon, indexSpatial, depart, arrivee,
-                              departLL, arriveeLL, cibleM, nombre, cote, iterations, tolerance) {
+                              departLL, arriveeLL, cibleM, nombre, cote,
+                              iterations, tolerance, variantes = null) {
   const corde = distanceHaversine(departLL[0], departLL[1], arriveeLL[0], arriveeLL[1]);
   const reste = Math.max(0.0, Math.pow(cibleM / 2.0, 2) - Math.pow(corde / 2.0, 2));
   let bas = 0.0, haut = Math.sqrt(reste) * 1.7 + 300.0;
@@ -231,16 +238,17 @@ export function chercheTrajet(routeur, aretes, lat, lon, indexSpatial, depart, a
     const [longueur, repetee, trajet] = essai;
     const note = noteBoucle(longueur, repetee, cibleM, tolerance,
                             viragesSerres(trajet, aretes, lat, lon, longueur));
-    if (meilleur === null || compareNote(note, meilleur[0]) < 0) {
-      meilleur = [note, longueur, repetee, trajet, nombre, cote, hauteur];
-    }
+    const essaiNote = [note, longueur, repetee, trajet, nombre, cote, hauteur];
+    if (variantes) variantes.push(essaiNote);
+    if (meilleur === null || compareNote(note, meilleur[0]) < 0) meilleur = essaiNote;
     if (longueur < cibleM) bas = hauteur; else haut = hauteur;
   }
   return meilleur;
 }
 
 export function affineTrajet(routeur, aretes, lat, lon, indexSpatial, depart, arrivee,
-                             departLL, arriveeLL, cibleM, tolerance, repetitionMax, meilleur) {
+                             departLL, arriveeLL, cibleM, tolerance,
+                             repetitionMax, meilleur, variantes = null) {
   const nombre = meilleur[4], cote = meilleur[5], hauteur = meilleur[6];
   for (const facteur of [0.84, 0.88, 0.92, 0.96, 1.04, 1.08, 1.12, 1.16]) {
     const essai = construitTrajet(routeur, aretes, indexSpatial, depart, arrivee,
@@ -250,9 +258,10 @@ export function affineTrajet(routeur, aretes, lat, lon, indexSpatial, depart, ar
     if (longueur && repetee / longueur > repetitionMax) continue;
     const note = noteBoucle(longueur, repetee, cibleM, tolerance,
                             viragesSerres(trajet, aretes, lat, lon, longueur));
-    if (compareNote(note, meilleur[0]) < 0) {
-      meilleur = [note, longueur, repetee, trajet, nombre, cote, hauteur * facteur];
-    }
+    const essaiNote = [note, longueur, repetee, trajet, nombre, cote,
+                       hauteur * facteur];
+    if (variantes) variantes.push(essaiNote);
+    if (compareNote(note, meilleur[0]) < 0) meilleur = essaiNote;
   }
   return meilleur;
 }

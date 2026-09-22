@@ -347,12 +347,13 @@
            aria-label="Distance en kilomètres">
   </div>
   <p class="aide">Une tolérance de 3 % est admise : entre deux boucles, celle qui
-     ne se répète pas l'emporte sur celle qui tombe pile.</p>
+     ne se répète pas l'emporte sur celle qui tombe pile. Un tracé net est
+     préféré à la distance exacte, dans la limite d'un cinquième.</p>
 
   <label for="niveau">Exigence de praticabilité</label>
   <select id="niveau">
     <option value="strict">Stricte — bitume et stabilisé uniquement</option>
-    <option value="normal" selected>Normale — chemins documentés et balisés</option>
+    <option value="normal" selected>Normale — chemins entretenus et documentés</option>
     <option value="tolerant">Tolérante — accepte les sentiers non documentés</option>
   </select>
 
@@ -363,6 +364,9 @@
   <div id="message"></div>
 
   <div id="pied">
+    <p style="margin:0 0 6px">Là où les deux trottoirs d'une rue sont
+       cartographiés, le parcours prend celui de gauche, face au trafic. Ailleurs
+       la carte ne décrit qu'un axe : c'est à toi de courir du bon côté.</p>
     <p style="margin:0 0 6px">Tout est calculé dans ton navigateur. Aucune donnée
        n'est envoyée à l'éditeur du site.</p>
     <p style="margin:0 0 6px">Fond de carte et données &copy; les

@@ -40,6 +40,8 @@ self.onmessage = async (evenement) => {
         // les passait sous silence.
         doublement: resultat.doublement,
         portionsDoublees: resultat.portionsDoublees,
+        bouclettes: resultat.bouclettes,
+        nbBouclettes: resultat.nbBouclettes,
         types: resultat.types,
         qualites: resultat.qualites,
         boucle: resultat.boucle,

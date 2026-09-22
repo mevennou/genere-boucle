@@ -44,6 +44,8 @@ def cas_de_tags():
         ("service", "emergency_access"), ("service", "slipway"),
         ("ford", "yes"), ("ford", "stepping_stones"), ("ford", "no"),
         ("overgrown", "yes"), ("seasonal", "spring"), ("seasonal", "no"),
+        ("obstacle", "vegetation"), ("obstacle", "log"),
+        ("obstacle", "fallen_tree"), ("obstacle", "gate"),
         ("flooded", "yes"), ("informal", "yes"), ("abandoned", "yes"),
         ("disused", "yes"),
         ("trail_visibility", "bad"), ("trail_visibility", "horrible"),
@@ -223,6 +225,78 @@ def reseau_fabrique():
     return voies, sorted(set(interdites))
 
 
+def traces_types():
+    """Traces fabriques couvrant chaque cas du controle geometrique."""
+    cos47 = 0.6819983600624985          # cos(47 deg), fige pour la stabilite
+    dlat = lambda m: m / 111320.0
+    dlon = lambda m: m / 111320.0 / cos47
+
+    def carre(cote=800, pas=20):
+        p, n = [], cote // pas
+        for k in range(n + 1):
+            p.append([47.0, 5.0 + dlon(k * pas)])
+        for k in range(1, n + 1):
+            p.append([47.0 + dlat(k * pas), 5.0 + dlon(cote)])
+        for k in range(1, n + 1):
+            p.append([47.0 + dlat(cote), 5.0 + dlon(cote - k * pas)])
+        for k in range(1, n + 1):
+            p.append([47.0 + dlat(cote - k * pas), 5.0])
+        return p
+
+    traces = {}
+    traces["carre"] = carre()
+    traces["carre_ferme"] = carre() + [carre()[0]]
+
+    # Aller par la rue, retour par le trottoir douze metres a cote.
+    t = carre()[:20]
+    t += [[47.0 - dlat(k * 19), 5.0 + dlon(380)] for k in range(1, 9)]
+    t += [[47.0 - dlat(k * 19), 5.0 + dlon(392)] for k in range(8, 0, -1)]
+    t += carre()[20:]
+    traces["rue_puis_trottoir"] = t
+
+    # Demi-tour franc sur la meme voie.
+    traces["demi_tour"] = carre() + carre()[:20]
+
+    # Crochet ferme sur lui-meme au milieu du parcours : la bouclette.
+    t = carre()[:15]
+    base = t[-1]
+    for k in range(1, 6):
+        t.append([base[0] - dlat(k * 30), base[1]])
+    for k in range(1, 6):
+        t.append([base[0] - dlat(150), base[1] + dlon(k * 30)])
+    for k in range(1, 6):
+        t.append([base[0] - dlat(150 - k * 30), base[1] + dlon(150)])
+    for k in range(1, 6):
+        t.append([base[0], base[1] + dlon(150 - k * 30)])
+    t += carre()[15:]
+    traces["bouclette"] = t
+
+    # Trop court pour que la mesure ait un sens.
+    traces["minuscule"] = [[47.0, 5.0], [47.0, 5.001]]
+    return traces
+
+
+def dump_controle():
+    """Mesures geometriques sur des traces types, pour verrouiller la parite.
+
+    Le site applique exactement le meme controle que le script : sans ces
+    references, les deux implementations pourraient diverger sans bruit.
+    """
+    cas = []
+    for nom, points in sorted(traces_types().items()):
+        doublement = ORIGINE.mesure_doublement(points)
+        bouclettes = ORIGINE.mesure_bouclettes(points)
+        cas.append({
+            "nom": nom,
+            "points": points,
+            "doublement": doublement["longueur"],
+            "nb_portions": len(doublement["portions"]),
+            "bouclettes": bouclettes["longueur"],
+            "nb_bouclettes": bouclettes["nombre"],
+        })
+    return cas
+
+
 def dump_bout_en_bout(voies):
     """Fait tourner genere() sur le reseau fabrique, sans toucher au reseau."""
     ORIGINE.telecharge_reseau = lambda *a, **k: voies
@@ -266,6 +340,7 @@ if __name__ == "__main__":
         "note_boucle.json": dump_note_boucle(),
         "allege.json": dump_allege(),
         "reseau.json": {"voies": voies, "noeuds_interdits": interdites},
+        "controle.json": dump_controle(),
         "bout_en_bout.json": dump_bout_en_bout(voies),
     }
     for nom, contenu in fichiers.items():

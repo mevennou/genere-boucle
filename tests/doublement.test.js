@@ -9,9 +9,11 @@ import assert from "node:assert/strict";
 import { lecture } from "./utils.js";
 import { reseauCouloir, sourceDe, dlat, dlon } from "./reseaux.js";
 
-import { mesureDoublement, distancePointSegment } from "../docs/js/controle.js";
+import { mesureDoublement, mesureBouclettes, distancePointSegment }
+  from "../docs/js/controle.js";
 import { detecteCorridors } from "../docs/js/corridors.js";
 import { construitGrapheBrut, contracte, supprimeImpasses, construitCSR } from "../docs/js/graphe.js";
+import { SURCOUT_COTE_DROIT } from "../docs/js/routage.js";
 import { Routeur } from "../docs/js/routage.js";
 import { genere } from "../docs/js/moteur.js";
 
@@ -78,6 +80,58 @@ test("doublement : ni le bruit ni la fermeture de boucle ne comptent", () => {
 
   // Trace trop court : pas de plantage.
   assert.equal(mesureDoublement([[47, 5], [47, 5.001]]).longueur, 0);
+});
+
+// --- petites boucles ------------------------------------------------------
+test("bouclettes : un circuit propre n'en contient aucune", () => {
+  assert.equal(mesureBouclettes(carrePropre()).nombre, 0);
+  // La fermeture de la boucle principale est le but recherche, pas un defaut.
+  const ferme = [...carrePropre()];
+  ferme.push(ferme[0]);
+  assert.equal(mesureBouclettes(ferme).nombre, 0);
+  // Trace trop court : pas de plantage.
+  assert.equal(mesureBouclettes([[47, 5], [47, 5.001]]).nombre, 0);
+});
+
+test("bouclettes : un crochet referme sur lui-meme est vu", () => {
+  // Le defaut des captures : le trace quitte un carrefour, fait le tour d'un
+  // pate de maisons de 150 m de cote et revient au meme carrefour.
+  const carre = carrePropre();
+  const trace = carre.slice(0, 15);
+  const [baseLat, baseLon] = trace[trace.length - 1];
+  for (let k = 1; k <= 5; k++) trace.push([baseLat - dlat(k * 30), baseLon]);
+  for (let k = 1; k <= 5; k++) trace.push([baseLat - dlat(150), baseLon + dlon(k * 30)]);
+  for (let k = 1; k <= 5; k++) trace.push([baseLat - dlat(150 - k * 30), baseLon + dlon(150)]);
+  for (let k = 1; k <= 5; k++) trace.push([baseLat, baseLon + dlon(150 - k * 30)]);
+  trace.push(...carre.slice(15));
+
+  const m = mesureBouclettes(trace);
+  assert.equal(m.nombre, 1, "le crochet doit etre repere une fois, pas deux");
+  assert.ok(m.longueur > 500, `bouclette de ${m.longueur.toFixed(0)} m seulement`);
+});
+
+test("bouclettes : un demi-tour n'est pas une boucle", () => {
+  // Revenir sur ses pas est un doublement, pas un lacet : les deux mesures ne
+  // doivent pas se confondre, sinon on corrigerait le mauvais defaut.
+  const carre = carrePropre();
+  const trace = [...carre, ...carre.slice(0, 20)];
+  assert.ok(mesureDoublement(trace).longueur > 300);
+  assert.equal(mesureBouclettes(trace).nombre, 0);
+});
+
+test("controle geometrique : parite exacte avec le script Python", () => {
+  // Le site et le script appliquent le meme controle. Sans ces references,
+  // les deux implementations divergeraient sans que rien ne le signale.
+  for (const cas of lecture("controle.json")) {
+    const d = mesureDoublement(cas.points);
+    const b = mesureBouclettes(cas.points);
+    assert.ok(Math.abs(d.longueur - cas.doublement) < 1e-6,
+      `${cas.nom} : doublement ${d.longueur} contre ${cas.doublement} en Python`);
+    assert.equal(d.portions.length, cas.nb_portions, `${cas.nom} : portions`);
+    assert.ok(Math.abs(b.longueur - cas.bouclettes) < 1e-6,
+      `${cas.nom} : bouclettes ${b.longueur} contre ${cas.bouclettes} en Python`);
+    assert.equal(b.nombre, cas.nb_bouclettes, `${cas.nom} : nombre de bouclettes`);
+  }
 });
 
 // --- detection des voies jumelles ----------------------------------------
@@ -154,6 +208,87 @@ test("penalite : le trottoir d'a cote est penalise avec sa rue", () => {
   apres.penalise(rue);
   assert.equal(apres.estPenalisee(jumelle), true,
     "avec couloirs, penaliser la rue penalise son trottoir");
+});
+
+// --- courir a gauche ------------------------------------------------------
+/** Rue est-ouest, ses deux trottoirs cartographies a part, traversees aux bouts. */
+function rueADeuxTrottoirs() {
+  let idN = 1, idV = 1;
+  const voies = [];
+  const voie = (pts, tags) => voies.push({
+    type: "way", id: idV++, tags, nodes: pts.map((p) => p[0]),
+    geometry: pts.map((p) => ({ lat: p[1], lon: p[2] })),
+  });
+  const ligne = (ecart) => {
+    const pts = [];
+    for (let x = 0; x <= 600; x += 50) pts.push([idN++, 47 + dlat(ecart), 5 + dlon(x)]);
+    return pts;
+  };
+  const rue = ligne(0), nord = ligne(8), sud = ligne(-8);
+  const bitume = { surface: "asphalt" };
+  voie(rue, { highway: "residential", ...bitume });
+  voie(nord, { highway: "footway", footway: "sidewalk", ...bitume });
+  voie(sud, { highway: "footway", footway: "sidewalk", ...bitume });
+  for (const k of [0, rue.length - 1]) {
+    voie([sud[k], rue[k]], { highway: "footway", ...bitume });
+    voie([rue[k], nord[k]], { highway: "footway", ...bitume });
+  }
+  return { voies, rue };
+}
+
+test("courir a gauche : le sens de parcours decide du trottoir", () => {
+  // Hors agglomeration, le pieton circule pres du bord gauche de la chaussee.
+  // Le graphe ne peut designer un bord que la ou les deux cotes sont
+  // cartographies a part : c'est le cas ici, et le choix doit s'inverser avec
+  // le sens de la course.
+  const { voies, rue } = rueADeuxTrottoirs();
+  const G = construitGrapheBrut(voies, "normal", new Set(), new Set());
+  const { aretes, adjacence } = contracte(G.brut, G.nbNoeuds, new Set());
+  const { couloir, decalage, alignement } = detecteCorridors(aretes, G.lat, G.lon);
+  const routeur = new Routeur(construitCSR(adjacence, G.nbNoeuds), aretes,
+                              G.lat, G.lon, G.nbNoeuds, couloir, decalage, alignement);
+
+  const parCoord = new Map();
+  for (let n = 0; n < G.nbNoeuds; n++) {
+    parCoord.set(`${G.lat[n].toFixed(7)},${G.lon[n].toFixed(7)}`, n);
+  }
+  const noeudDe = (p) => parCoord.get(`${p[1].toFixed(7)},${p[2].toFixed(7)}`);
+  const ouest = noeudDe(rue[0]), est = noeudDe(rue[rue.length - 1]);
+
+  // Metres parcourus au nord et au sud de l'axe de la rue.
+  const cotes = (trajet) => {
+    let nord = 0, sud = 0;
+    for (const [index] of trajet) {
+      const p = aretes[index].polyligne;
+      const ecart = (G.lat[p[Math.floor(p.length / 2)]] - 47) * 111320;
+      if (ecart > 2) nord += aretes[index].longueur;
+      else if (ecart < -2) sud += aretes[index].longueur;
+    }
+    return { nord, sud };
+  };
+
+  routeur.nouvellesPenalites();
+  const versEst = cotes(routeur.plusCourtChemin(ouest, est)[1]);
+  assert.ok(versEst.nord > 500 && versEst.sud === 0,
+    `vers l'est, la gauche est au nord : ${JSON.stringify(versEst)}`);
+
+  routeur.nouvellesPenalites();
+  const versOuest = cotes(routeur.plusCourtChemin(est, ouest)[1]);
+  assert.ok(versOuest.sud > 500 && versOuest.nord === 0,
+    `vers l'ouest, la gauche est au sud : ${JSON.stringify(versOuest)}`);
+});
+
+test("courir a gauche : une preference, pas une interdiction", () => {
+  // Un surcout trop fort ferait traverser la rue pour quelques metres, ou
+  // ecarterait des itineraires valables. Il doit rester modere, et ne jamais
+  // s'appliquer la ou la voie est cartographiee par son seul axe.
+  assert.ok(SURCOUT_COTE_DROIT > 1 && SURCOUT_COTE_DROIT < 2,
+    `surcout de ${SURCOUT_COTE_DROIT} : hors de proportion`);
+
+  const { G, aretes } = grapheDe(lecture("reseau.json").voies);
+  const { decalage } = detecteCorridors(aretes, G.lat, G.lon);
+  assert.ok(decalage.every((d) => d === 0),
+    "sans voie jumelle, aucun cote ne doit etre designe");
 });
 
 // --- bout en bout ---------------------------------------------------------

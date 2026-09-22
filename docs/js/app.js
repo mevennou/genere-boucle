@@ -347,11 +347,14 @@ function dessine(r) {
 
   // Une fois le parcours trouve, c'est la carte qu'on veut voir : sur
   // telephone la feuille se replie et garde l'essentiel sous les yeux.
-  const doubles = r.doublement > 0
-    ? `, ${Math.round(r.doublement)} m longeant une autre portion` : "";
+  const defauts = (r.doublement > 0
+      ? `, ${Math.round(r.doublement)} m longeant une autre portion` : "")
+    + (r.nbBouclettes > 0
+      ? `, ${r.nbBouclettes} petite${r.nbBouclettes > 1 ? "s" : ""} boucle`
+        + `${r.nbBouclettes > 1 ? "s" : ""}` : "");
   $("resume").textContent = `${(r.distance / 1000).toFixed(2)} km`
     + (r.repetee < 1 ? ", sans aller-retour" : `, ${Math.round(r.repetee)} m repassés`)
-    + doubles;
+    + defauts;
   if (estMobile()) replie(true);
 
   // Cadrage apres le repli seulement : la marge a reserver n'est pas la meme
@@ -368,9 +371,11 @@ function dessine(r) {
   html += `<tr><td>Aller-retour</td><td class="${propre ? "bon" : ""}">`
         + `${propre ? "aucun" : Math.round(r.repetee) + " m"}</td></tr>`;
   html += `<tr><td>Départ à</td><td>${Math.round(r.accroche)} m du point posé</td></tr>`;
-  if (r.doublement > 0) {
-    html += `<tr><td>Portions longées</td><td>${Math.round(r.doublement)} m</td></tr>`;
-  }
+  html += `<tr><td>Portions longées</td><td class="${r.doublement > 0 ? "" : "bon"}">`
+        + `${r.doublement > 0 ? Math.round(r.doublement) + " m" : "aucune"}</td></tr>`;
+  html += `<tr><td>Petites boucles</td><td class="${r.nbBouclettes > 0 ? "" : "bon"}">`
+        + `${r.nbBouclettes > 0
+              ? `${r.nbBouclettes} (${Math.round(r.bouclettes)} m)` : "aucune"}</td></tr>`;
   html += "</table>";
 
   html += '<div class="titre-bloc">Praticabilité vérifiée</div><table>';

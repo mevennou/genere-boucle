@@ -15,7 +15,7 @@ import {
 } from "./boucle.js";
 import { repartition, allege } from "./sortie.js";
 import { detecteCorridors } from "./corridors.js";
-import { mesureDoublement } from "./controle.js";
+import { mesureDoublement, mesureBouclettes } from "./controle.js";
 
 export class DonneesIndisponibles extends Error {}
 export class BoucleIntrouvable extends Error {}
@@ -27,11 +27,21 @@ const km = (m) => (m / 1000).toFixed(2);
 // parcours un peu plus court a un parcours qui se longe, trop peu pour que le
 // plus court chemin direct — qui ne double rien par construction — devienne
 // une reponse acceptable a « quinze kilometres ».
-export const MARGE_REPLI = 0.10;
+export const MARGE_REPLI = 0.20;
+
+// Combien de candidats le controle geometrique examine, du meilleur au moins
+// bon. Les traces sans defaut ne sont pas forcement les mieux classes sur la
+// distance : en regarder une poignee ne suffisait pas a en trouver un.
+const CANDIDATS_EXAMINES = 48;
+
+// Nombre de points de passage essayes pour un parcours d'un point a un autre.
+// Au-dela de quatre, l'arc se plie assez pour tenir une longue distance entre
+// deux points proches sans se refermer en lacets.
+const POINTS_DE_PASSAGE = [1, 2, 3, 4, 5, 6];
 
 /**
- * Choisit, parmi les candidats classes du meilleur au moins bon, le premier
- * qui ne longe pas une portion de lui-meme.
+ * Choisit, parmi les candidats classes du meilleur au moins bon, celui dont
+ * le dessin tient la route : ni portion longee, ni petite boucle ajoutee.
  *
  * Le repli ne porte que sur des candidats qui tiennent encore la distance.
  * Sans ce garde-fou, le plus court chemin direct — qui ne double evidemment
@@ -39,9 +49,13 @@ export const MARGE_REPLI = 0.10;
  * demandes, 1 km rendu. Mieux vaut un parcours qui longe cent metres de
  * lui-meme, et le dire, qu'un parcours a la bonne allure mais dix fois trop
  * court.
+ *
+ * L'ordre de preference est explicite : d'abord un trace sans rien a redire,
+ * sinon un trace qui ne longe pas une portion de lui-meme, sinon le meilleur
+ * tel quel — et le defaut restant est alors annonce.
  */
-export function choisitSansDoublement(meilleur, reserve, cible, seuil,
-                                      pointsDe, maximum) {
+export function choisitTracePropre(meilleur, reserve, cible, seuils,
+                                   pointsDe, maximum) {
   const erreurDe = (candidat) => Math.abs(candidat[1] - cible) / cible;
   // Le repli part de ce que le meilleur atteignait deja : sur un reseau qui
   // sature, manquer la distance est acceptable, s'en eloigner encore d'un
@@ -52,13 +66,45 @@ export function choisitSansDoublement(meilleur, reserve, cible, seuil,
     ...reserve.filter((c) => c !== meilleur && erreurDe(c) <= erreurMax),
   ].slice(0, maximum);
 
-  let choisi = null, doublement = null;
+  const mesures = [];
+  let sansDoublement = null;
   for (const candidat of candidats) {
-    const mesure = mesureDoublement(pointsDe(candidat));
-    if (choisi === null) { choisi = candidat; doublement = mesure; }
-    if (mesure.longueur <= seuil) { choisi = candidat; doublement = mesure; break; }
+    const points = pointsDe(candidat);
+    const mesure = { candidat, doublement: mesureDoublement(points),
+                     bouclettes: mesureBouclettes(points) };
+    mesures.push(mesure);
+    if (mesure.doublement.longueur > seuils.doublement) continue;
+    if (mesure.bouclettes.longueur <= seuils.bouclettes) return rendu(mesure);
+    if (sansDoublement === null) sansDoublement = mesure;
   }
-  return [choisi, doublement];
+  return rendu(sansDoublement || mesures[0]);
+}
+
+const rendu = (m) => [m.candidat, m.doublement, m.bouclettes];
+
+/**
+ * Ce qu'on accepte de laisser passer sur le dessin final. Une portion longee
+ * se compte en part de la distance ; une bouclette, elle, n'a pas de taille
+ * acceptable : le seuil vaut le plancher de detection, donc toute bouclette
+ * reperee compte.
+ */
+function seuilsGeometriques(cibleM) {
+  return { doublement: Math.max(30, cibleM * 0.005), bouclettes: 60 };
+}
+
+/** Dit ce qui reste a redire sur le trace retenu, plutot que de le taire. */
+function annonceDefauts(journal, quoi, remplace, doublement, bouclettes, seuils) {
+  if (remplace) {
+    journal(`  le meilleur ${quoi} avait un defaut de trace : candidat suivant retenu`);
+  }
+  if (doublement.longueur > seuils.doublement) {
+    journal(`  aucun ${quoi} sans portion doublee a cette distance : le meilleur `
+          + `longe ${doublement.longueur.toFixed(0)} m de lui-meme`);
+  }
+  if (bouclettes.longueur > seuils.bouclettes) {
+    journal(`  aucun ${quoi} sans petite boucle a cette distance : il en reste `
+          + `${bouclettes.nombre} (${bouclettes.longueur.toFixed(0)} m au total)`);
+  }
 }
 
 export async function genere({
@@ -145,7 +191,8 @@ export async function genere({
   journal(`  ${aretes.length} aretes, ${Math.floor(nbCoeur / 2)} apres elagage `
         + "des culs-de-sac");
 
-  const { couloir, nbJumelages } = detecteCorridors(aretes, latN, lonN);
+  const { couloir, nbJumelages, decalage, alignement } =
+    detecteCorridors(aretes, latN, lonN);
   if (nbJumelages) {
     journal(`  ${nbJumelages} voies doublees d'un trottoir cartographie a part : `
           + "regroupees, pour qu'aller par l'une et revenir par l'autre compte "
@@ -153,7 +200,7 @@ export async function genere({
   }
 
   const routeur = new Routeur(construitCSR(adjacence, nbNoeuds), aretes,
-                              latN, lonN, nbNoeuds, couloir);
+                              latN, lonN, nbNoeuds, couloir, decalage, alignement);
 
   let depart, amorce = [], longueurAmorce = 0.0;
   if (coeur[departBrut]) {
@@ -194,7 +241,8 @@ export async function genere({
   }
   const indexCoeur = new IndexSpatial(latN, lonN, atteignables);
   const routeurCoeur = new Routeur(construitCSR(coeur, nbNoeuds), aretes,
-                                   latN, lonN, nbNoeuds, couloir);
+                                   latN, lonN, nbNoeuds, couloir, decalage,
+                                   alignement);
 
   // 4. recherche -----------------------------------------------------------
   if (arrivee) {
@@ -209,9 +257,10 @@ export async function genere({
   const budget = Math.max(cibleM - 2 * longueurAmorce, cibleM * 0.3);
   journal(`4/5 Recherche de la boucle (${caps} orientations x ${sommets.length} formes)`);
   let meilleur = null;
-  // On garde une petite liste de reserve : si le meilleur candidat se revele
-  // doubler une portion, on prend le suivant plutot que de le servir tel quel.
-  const reserve = [];
+  // Toutes les tentatives valides sont gardees en reserve : si le meilleur
+  // candidat se revele avoir un defaut de trace, on prend le suivant plutot
+  // que de le servir tel quel.
+  const variantes = [];
 
   for (let indexCap = 0; indexCap < caps; indexCap++) {
     const cap = indexCap * 360.0 / caps;
@@ -219,14 +268,13 @@ export async function genere({
     for (const nbSommets of sommets) {
       const essai = chercheBoucle(routeurCoeur, aretes, latN, lonN, indexCoeur,
                                   depart, lat, lon, budget, cap, nbSommets,
-                                  iterations, tolerance);
+                                  iterations, tolerance, variantes);
       if (essai === null) { ligne += `  ${nbSommets}s: -`; continue; }
       const [note, longueur, repetee] = essai;
       const part = longueur ? repetee / longueur : 1.0;
       ligne += `  ${nbSommets}s: ${km(longueur + 2 * longueurAmorce)}km/`
              + `${(part * 100).toFixed(0)}%`;
       if (part > repetitionMax) continue;
-      reserve.push(essai);
       if (meilleur === null || compareNote(note, meilleur[0]) < 0) meilleur = essai;
     }
     journal(ligne);
@@ -242,7 +290,8 @@ export async function genere({
 
   const avant = meilleur;
   meilleur = affineBoucle(routeurCoeur, aretes, latN, lonN, indexCoeur, depart,
-                          lat, lon, budget, tolerance, repetitionMax, meilleur);
+                          lat, lon, budget, tolerance, repetitionMax, meilleur,
+                          variantes);
   if (meilleur !== avant) {
     journal(`  affinage : ${km(avant[1] + 2 * longueurAmorce)} km -> `
           + `${km(meilleur[1] + 2 * longueurAmorce)} km, repetition `
@@ -254,20 +303,15 @@ export async function genere({
   // par la rue et un retour par le trottoir d'a cote restent deux aretes
   // distinctes, donc invisibles pour tout comptage base sur les identifiants.
   // Ce controle ne suppose rien de la cause, il regarde le dessin obtenu.
-  const seuilDoublement = Math.max(30, cibleM * 0.005);
+  const seuils = seuilsGeometriques(cibleM);
   const pointsDe = (essai) =>
     allege(polyligneDuTrajet(essai[3], aretes).map((n) => [latN[n], lonN[n]]), maxPoints);
 
+  const reserve = variantes.filter((c) => !(c[1] && c[2] / c[1] > repetitionMax));
   reserve.sort((a, b) => compareNote(a[0], b[0]));
-  const [choisi, doublement] = choisitSansDoublement(
-    meilleur, reserve, budget, seuilDoublement, pointsDe, 10);
-
-  if (doublement.longueur > seuilDoublement) {
-    journal(`  aucune boucle sans portion doublee a cette distance : la meilleure `
-          + `longe ${doublement.longueur.toFixed(0)} m d'elle-meme`);
-  } else if (choisi !== meilleur) {
-    journal("  la meilleure boucle doublait une portion : candidat suivant retenu");
-  }
+  const [choisi, doublement, bouclettes] = choisitTracePropre(
+    meilleur, reserve, budget, seuils, pointsDe, CANDIDATS_EXAMINES);
+  annonceDefauts(journal, "boucle", choisi !== meilleur, doublement, bouclettes, seuils);
   meilleur = choisi;
 
   const [, longueur, repetee, trajet, nbSommets, cap] = meilleur;
@@ -302,6 +346,7 @@ export async function genere({
       .map(([q, m]) => [LIBELLES_QUALITE[q] || q, m]),
     longueurBoucle: longueur, boucle: true,
     doublement: doublement.longueur, portionsDoublees: doublement.portions.length,
+    bouclettes: bouclettes.longueur, nbBouclettes: bouclettes.nombre,
   };
 }
 
@@ -328,20 +373,19 @@ function traceVersArrivee({
 
   journal(`4/5 Recherche du parcours (plus court chemin : ${km(totalMinimum)} km)`);
   let meilleur = null;
-  const reserve = [];
-  for (const nombre of [1, 2, 3, 4]) {
+  const variantes = [];
+  for (const nombre of POINTS_DE_PASSAGE) {
     let ligne = `  ${nombre} point(s) de passage :`;
     for (const [cote, libelle] of [[1.0, "gauche"], [-1.0, "droite"]]) {
       const essai = chercheTrajet(routeur, aretes, latN, lonN, indexCoeur, depart,
                                   noeudArrivee, departLL, arriveeLL, budget,
-                                  nombre, cote, iterations, tolerance);
+                                  nombre, cote, iterations, tolerance, variantes);
       if (essai === null) { ligne += `  ${libelle} : -`; continue; }
       const [note, longueur, repetee] = essai;
       const part = longueur ? repetee / longueur : 1.0;
       ligne += `  ${libelle} : ${km(longueur + longueurAmorce + longueurAmorceArrivee)}`
              + ` km / ${(part * 100).toFixed(0)} %`;
       if (part > repetitionMax) continue;
-      reserve.push(essai);
       if (meilleur === null || compareNote(note, meilleur[0]) < 0) meilleur = essai;
     }
     journal(ligne);
@@ -355,25 +399,20 @@ function traceVersArrivee({
 
   meilleur = affineTrajet(routeur, aretes, latN, lonN, indexCoeur, depart,
                           noeudArrivee, departLL, arriveeLL, budget, tolerance,
-                          repetitionMax, meilleur);
+                          repetitionMax, meilleur, variantes);
 
   // Meme controle geometrique que pour les boucles : un parcours d'un point a
   // un autre peut tout aussi bien longer une portion de lui-meme, par la rue a
   // l'aller et le trottoir au retour.
-  const seuilDoublement = Math.max(30, cibleM * 0.005);
+  const seuils = seuilsGeometriques(cibleM);
   const pointsDe = (essai) =>
     allege(polyligneDuTrajet(essai[3], aretes).map((n) => [latN[n], lonN[n]]), maxPoints);
 
+  const reserve = variantes.filter((c) => !(c[1] && c[2] / c[1] > repetitionMax));
   reserve.sort((a, b) => compareNote(a[0], b[0]));
-  const [choisi, doublement] = choisitSansDoublement(
-    meilleur, reserve, budget, seuilDoublement, pointsDe, 8);
-
-  if (doublement.longueur > seuilDoublement) {
-    journal(`  aucun parcours sans portion doublee a cette distance : le meilleur `
-          + `longe ${doublement.longueur.toFixed(0)} m de lui-meme`);
-  } else if (choisi !== meilleur) {
-    journal("  le meilleur parcours doublait une portion : candidat suivant retenu");
-  }
+  const [choisi, doublement, bouclettes] = choisitTracePropre(
+    meilleur, reserve, budget, seuils, pointsDe, CANDIDATS_EXAMINES);
+  annonceDefauts(journal, "parcours", choisi !== meilleur, doublement, bouclettes, seuils);
   meilleur = choisi;
 
   const [, longueur, repetee, trajet, nombre] = meilleur;
@@ -403,6 +442,7 @@ function traceVersArrivee({
       .map(([q, m]) => [LIBELLES_QUALITE[q] || q, m]),
     longueurBoucle: longueur, boucle: false,
     doublement: doublement.longueur, portionsDoublees: doublement.portions.length,
+    bouclettes: bouclettes.longueur, nbBouclettes: bouclettes.nombre,
   };
 }
 

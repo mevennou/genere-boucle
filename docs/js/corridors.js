@@ -59,10 +59,32 @@ class UnionFind {
   }
 }
 
+/** Vecteur d'une arete, de son debut vers sa fin, en metres (est, nord). */
+function vecteur(arete, lat, lon) {
+  const p = arete.polyligne;
+  const a = p[0], b = p[p.length - 1];
+  const cos = Math.cos(lat[a] * RAD);
+  return [(lon[b] - lon[a]) * 111320 * cos, (lat[b] - lat[a]) * 111320];
+}
+
+/** Milieu geometrique approche d'une arete. */
+function milieu(arete, lat, lon) {
+  const p = arete.polyligne;
+  const k = p[Math.floor(p.length / 2)];
+  return [lat[k], lon[k]];
+}
+
 /**
- * Renvoie { couloir, nbCouloirs, nbJumelages } ou couloir[i] est
- * l'identifiant du couloir de l'arete i. Sans jumelle, couloir[i] === i et
- * tout se comporte exactement comme avant.
+ * Renvoie { couloir, nbCouloirs, nbJumelages, decalage, alignement } ou
+ * couloir[i] est l'identifiant du couloir de l'arete i. Sans jumelle,
+ * couloir[i] === i et tout se comporte exactement comme avant.
+ *
+ * `decalage[i]` est l'ecart lateral de l'arete i par rapport a l'arete de
+ * reference de son couloir, en metres, compte positivement a gauche du sens
+ * de cette reference. `alignement[i]` vaut +1 si l'arete i va dans le meme
+ * sens que la reference, -1 sinon. Les deux ensemble disent, pour un sens de
+ * parcours donne, si l'on court a gauche ou a droite de la chaussee — ce que
+ * le code de la route francais demande hors agglomeration.
  */
 export function detecteCorridors(aretes, lat, lon, {
   ecartMax = 14,          // ecart lateral maximal entre deux voies jumelles
@@ -124,5 +146,31 @@ export function detecteCorridors(aretes, lat, lon, {
   const couloir = new Int32Array(n);
   for (let i = 0; i < n; i++) couloir[i] = union.trouve(i);
   const distincts = new Set(couloir);
-  return { couloir, nbCouloirs: distincts.size, nbJumelages: jumelages };
+
+  // Cote de la chaussee. Seules les aretes jumelees en ont un : ailleurs, la
+  // voie est cartographiee par son axe et le trace ne peut pas designer un
+  // bord plutot que l'autre.
+  const decalage = new Float64Array(n);
+  const alignement = new Int8Array(n).fill(1);
+  for (let i = 0; i < n; i++) {
+    const reference = couloir[i];
+    if (reference === i) continue;
+    const [rx, ry] = vecteur(aretes[reference], lat, lon);
+    const norme = Math.hypot(rx, ry);
+    if (norme < 1) continue;
+    const [ix, iy] = vecteur(aretes[i], lat, lon);
+    alignement[i] = (ix * rx + iy * ry) >= 0 ? 1 : -1;
+
+    // Ecart lateral du milieu de i par rapport a l'axe de la reference,
+    // positif a gauche du sens de la reference.
+    const [mlat, mlon] = milieu(aretes[i], lat, lon);
+    const p = aretes[reference].polyligne;
+    const alat = lat[p[0]], alon = lon[p[0]];
+    const cos = Math.cos(alat * RAD);
+    const ox = (mlon - alon) * 111320 * cos, oy = (mlat - alat) * 111320;
+    decalage[i] = (rx * oy - ry * ox) / norme;
+  }
+
+  return { couloir, nbCouloirs: distincts.size, nbJumelages: jumelages,
+           decalage, alignement };
 }

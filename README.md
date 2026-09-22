@@ -20,7 +20,8 @@ Ce n'est pas un simple appel à un serveur de routage.
 2. Le graphe piétonnier est **construit ici**, et n'accueille que les voies dont les tags OSM attestent la praticabilité. Un sentier broussailleux, une trace informelle, un gué, une voie privée n'existent tout simplement pas dans le graphe : l'itinéraire ne peut pas y passer. C'est une garantie structurelle, pas une pénalité qu'une bonne distance pourrait compenser.
 3. Toutes les impasses sont supprimées (réduction dite « 2-cœur » : retrait itératif des nœuds n'ayant qu'un seul voisin). Plus d'antenne sans issue, donc plus d'aller-retour ni de demi-tour.
 4. La boucle est cherchée par un polygone d'ancres (3 à 6 sommets) autour du départ, chaque tronçon calculé en A\* avec une forte pénalité sur les arêtes déjà empruntées : la distance cible est atteinte en **élargissant** la boucle, jamais en ajoutant des va-et-vient.
-5. Une rue et son trottoir cartographié à part sont deux arêtes distinctes du graphe, mais une seule voie sur le terrain : elles sont regroupées en **couloirs**, pour qu'aller par l'une et revenir par l'autre compte comme un aller-retour. Le tracé retenu subit enfin un contrôle géométrique, qui mesure la longueur longeant une autre portion du parcours et écarte le candidat au profit du suivant si besoin.
+5. Une rue et son trottoir cartographié à part sont deux arêtes distinctes du graphe, mais une seule voie sur le terrain : elles sont regroupées en **couloirs**, pour qu'aller par l'une et revenir par l'autre compte comme un aller-retour. Quand les deux bords d'une chaussée sont cartographiés, le couloir sait lequel est à gauche du sens de la course : le bord droit est légèrement renchéri, comme le demande le code de la route hors agglomération. C'est une préférence, pas une interdiction — traverser deux fois pour changer de trottoir ne vaudrait pas la règle.
+6. Le tracé retenu subit enfin un **contrôle géométrique**, sur le dessin obtenu et non sur le graphe. Il mesure deux défauts que le comptage par arête ne peut pas voir : la longueur qui longe une autre portion du parcours (aller par la rue, revenir par le trottoir), et les **petites boucles** refermées sur elles-mêmes — un crochet qui fait le tour d'un pâté de maisons et revient au même carrefour n'emprunte aucune arête deux fois. Plusieurs dizaines de candidats sont examinés, du meilleur au moins bon ; le premier tracé net l'emporte. Un repli ne peut pas coûter plus d'un cinquième de la distance demandée, sans quoi le plus court chemin direct — qui ne double rien puisqu'il ne fait aucun détour — finirait par gagner. Si aucun candidat n'est net, le défaut restant est annoncé plutôt que tu.
 
 ## Le site
 
@@ -59,8 +60,12 @@ Sans argument, une carte s'ouvre sur `http://127.0.0.1:8765/` : on y pose son d�
 | Niveau | Ce qui entre dans le graphe |
 | --- | --- |
 | `strict` | revêtement dur uniquement |
-| `normal` (défaut) | revêtement dur ou meuble avéré |
-| `tolerant` | accepte aussi les sentiers de revêtement inconnu |
+| `normal` (défaut) | revêtement dur, ou chemin naturel portant une preuve d'entretien |
+| `tolerant` | accepte aussi les sentiers sans revêtement ni documentation |
+
+Le niveau `normal` se méfie particulièrement du sous-bois. Un sentier en terre battue, sans nom, sans balisage, sans éclairage et sans état renseigné n'y entre pas : c'est le profil du chemin forestier oublié, qu'un arbre tombé ou un roncier suffit à rendre impraticable sans que la carte en sache rien. Il faut au moins un signe d'entretien — un nom, une appartenance à un itinéraire balisé, un éclairage public, une visibilité ou une qualité de surface renseignées. Sont écartés à tous les niveaux les chemins dont OpenStreetMap signale un encombrement (`obstacle=vegetation`, `log`, `fallen_tree`, `rockfall`…), et au niveau `normal` les chemins naturels notés `smoothness=very_bad`, c'est-à-dire ornières et racines.
+
+Cela reste un filtrage sur les **données**, pas sur le terrain : une carte peut être incomplète ou datée. L'itinéraire est à vérifier avant de le courir.
 
 ## Tests
 

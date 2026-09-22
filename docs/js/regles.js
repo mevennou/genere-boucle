@@ -30,6 +30,12 @@ export const SURFACES_INTERDITES = ens("mud", "sand", "snow", "ice", "salt",
                                        "water", "fine_sand");
 export const SERVICES_PRIVES = ens("driveway", "parking_aisle", "drive-through",
                                    "emergency_access", "slipway", "bus", "busway");
+// Ce qui barre un chemin sans etre une barriere : le tag obstacle decrit un
+// encombrement releve sur la voie. En sous-bois, c'est exactement le cas dont
+// on se mefie — un arbre en travers, un roncier, un eboulis.
+export const OBSTACLES_BLOQUANTS = ens(
+  "vegetation", "log", "fallen_tree", "tree", "rockfall", "landslide",
+  "boulder", "debris");
 export const BARRIERES_INFRANCHISSABLES = ens(
   "wall", "fence", "hedge", "retaining_wall", "city_wall", "ditch",
   "jersey_barrier", "full-height_turnstile", "sally_port", "spikes",
@@ -96,6 +102,7 @@ export function evalueVoie(tags, niveau, balise = false) {
   if (tags.flooded === "yes") return null;
   if (tags.informal === "yes") return null;
   if (tags.abandoned === "yes" || tags.disused === "yes") return null;
+  if (OBSTACLES_BLOQUANTS.has(tags.obstacle)) return null;
 
   const visibilite = tags.trail_visibility;
   const mauvaise = new Set(["bad", "horrible", "no"]);
@@ -109,6 +116,9 @@ export function evalueVoie(tags, niveau, balise = false) {
   if (lissage === "horrible" || lissage === "very_horrible"
       || lissage === "impassable") return null;
   if (niveau === "strict" && (lissage === "bad" || lissage === "very_bad")) return null;
+  // Ornieres et racines en sous-bois : praticable a pied, pas en courant.
+  if (niveau !== "tolerant" && lissage === "very_bad"
+      && (hw === "path" || hw === "track" || hw === "bridleway")) return null;
 
   const tracktype = tags.tracktype;
   if (tracktype === "grade4" || tracktype === "grade5") return null;
@@ -131,10 +141,15 @@ export function evalueVoie(tags, niveau, balise = false) {
     qualite = "inconnue";
   }
 
+  // Un sentier ou chemin rural sans revetement dur est la premiere source de
+  // mauvaises surprises : en sous-bois, un arbre tombe ou un roncier suffit a
+  // le rendre impraticable, et la carte n'en sait rien. On ne l'accepte donc
+  // au niveau normal que s'il porte une preuve d'entretien. La terre battue
+  // seule n'en est pas une : c'est le defaut de tous les sentiers oublies.
   const naturel = hw === "path" || hw === "track" || hw === "bridleway";
   if (naturel) {
     if (niveau === "strict" && qualite !== "dure") return null;
-    if (qualite === "inconnue" && niveau === "normal") {
+    if (qualite !== "dure" && niveau === "normal") {
       const documente = Boolean(tags.name) || balise
         || (!vide(tags.lit) && tags.lit !== "no")
         || visibilite === "excellent" || visibilite === "good"

@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { lecture } from "./utils.js";
-import { genere, BoucleIntrouvable, choisitSansDoublement, MARGE_REPLI }
+import { genere, BoucleIntrouvable, choisitTracePropre, MARGE_REPLI }
   from "../docs/js/moteur.js";
 import { reseauCouloir } from "./reseaux.js";
 import { distanceHaversine } from "../docs/js/geo.js";
@@ -300,16 +300,17 @@ test("parcours A vers B : le repli anti-doublement ne brade pas la distance", ()
   const direct = candidat(1000, false);        // le plus court chemin, propre
 
   // Le candidat legerement plus court est un repli raisonnable.
-  const [choisi, mesure] = choisitSansDoublement(
-    surLaCible, [surLaCible, unPeuCourt, direct], 10000, 50, pointsDe, 8);
+  const SEUILS = { doublement: 50, bouclettes: 60 };
+  const [choisi, mesure] = choisitTracePropre(
+    surLaCible, [surLaCible, unPeuCourt, direct], 10000, SEUILS, pointsDe, 8);
   assert.equal(choisi, unPeuCourt,
     "le repli doit s'arreter au candidat qui tient encore la distance");
   assert.equal(mesure.longueur, 0);
 
   // Le chemin direct, lui, ne repond pas a la demande : mieux vaut garder le
   // meilleur et annoncer le doublement que de rendre dix fois trop court.
-  const [garde, doublement] = choisitSansDoublement(
-    surLaCible, [surLaCible, direct], 10000, 50, pointsDe, 8);
+  const [garde, doublement] = choisitTracePropre(
+    surLaCible, [surLaCible, direct], 10000, SEUILS, pointsDe, 8);
   assert.equal(garde, surLaCible,
     "un parcours dix fois trop court n'est pas un repli acceptable");
   assert.ok(doublement.longueur > 50,
@@ -340,8 +341,9 @@ test("le repli respecte sa marge quelle que soit la reserve", () => {
     }
     const meilleur = reserve[Math.floor(hasard() * reserve.length)];
 
-    const [choisi] = choisitSansDoublement(meilleur, reserve, cible, 50,
-                                           (c) => traces.get(c), 8);
+    const [choisi] = choisitTracePropre(meilleur, reserve, cible,
+                                        { doublement: 50, bouclettes: 60 },
+                                        (c) => traces.get(c), 8);
     const erreur = (c) => Math.abs(c[1] - cible) / cible;
     assert.ok(choisi, "un candidat doit toujours etre retenu");
     assert.ok(erreur(choisi) <= erreur(meilleur) + MARGE_REPLI + 1e-9,
@@ -415,17 +417,23 @@ test("meme invariant sur un reseau a trottoirs, ou le repli se declenche", async
   }
 });
 
-test("parcours A vers B de 4 km : le reseau le permet, le moteur doit le tenir", async () => {
-  // Cas precis que l'ancien code ratait : un candidat tombait pile sur les
-  // 4 km, mais il longeait une portion de lui-meme ; le repli descendait
-  // alors jusqu'a un parcours 12 % trop court. Le seul test point a point
-  // existant s'arretait a 3 km, d'ou le trou.
+test("parcours A vers B de 4 km : un trace propre plutot qu'une distance exacte", async () => {
+  // Sur ce reseau, tous les candidats qui tombent pile sur les 4 km longent
+  // 350 a 600 m d'eux-memes et contiennent pres d'un kilometre de petites
+  // boucles. Le moteur doit preferer le parcours un peu plus court mais net,
+  // et le manque de distance doit rester dans la marge annoncee.
   const r = await genere({
     lat: DEPART[0], lon: DEPART[1], arrivee: [47.0096 + 0.004, 5.0096 + 0.004],
     cibleM: 4000, iterations: 10, source: sourceLocale(),
   });
+  assert.equal(r.nbBouclettes, 0,
+    `${r.nbBouclettes} petites boucles sur le parcours retenu`);
+  assert.ok(r.doublement <= Math.max(30, 4000 * 0.005),
+    `${r.doublement.toFixed(0)} m doubles sur le parcours retenu`);
+  // Et surtout, pas d'effondrement vers le plus court chemin : c'est le
+  // defaut d'origine, 15 km demandes pour 1 km rendu.
   const ecart = Math.abs(r.distance - 4000) / 4000;
-  assert.ok(ecart < 0.08,
+  assert.ok(ecart <= MARGE_REPLI,
     `4 km demandes, ${(r.distance / 1000).toFixed(2)} km rendus (${(ecart * 100).toFixed(0)} %)`);
 });
 
