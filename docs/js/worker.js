@@ -35,6 +35,8 @@ self.onmessage = async (evenement) => {
         cible: resultat.cible,
         repetee: resultat.repetee,
         accroche: resultat.accroche,
+        deplaceDepart: resultat.deplaceDepart,
+        deplaceArrivee: resultat.deplaceArrivee,
         longueurBoucle: resultat.longueurBoucle,
         // L'interface annonce les portions longees : sans cette mesure, elle
         // les passait sous silence.

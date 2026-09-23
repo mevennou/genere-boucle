@@ -698,13 +698,10 @@ def supprime_impasses(aretes, adjacence):
 # pas un quartier, c'est un ilot.
 MIN_NOEUDS_COEUR = 20
 
-# De combien on s'autorise a corriger un point pose sur un ilot sans issue.
-# Le moteur accroche toujours le point a un noeud du graphe, a quelques metres
-# pres : en deca de cette limite, la correction ne se distingue pas de cet
-# accrochage ordinaire. Au-dela, ce n'est plus une correction, c'est un autre
-# depart — et il vaut mieux le dire que rendre un parcours qui commence
-# ailleurs que la ou on se trouve.
-CORRECTION_MAX = 50.0
+# Jusqu'ou chercher une voie reliee au reste, quand le point pose n'en touche
+# aucune. La meme portee que la recherche initiale : au-dela, il n'y a plus
+# rien a proposer.
+PORTEE_SECOURS = 1500.0
 
 
 def composantes_utiles(adjacence, aretes, min_noeuds=MIN_NOEUDS_COEUR,
@@ -1821,7 +1818,8 @@ def trace_vers_arrivee(coeur, aretes, coords, index_coeur, depart,
                        noeud_arrivee, depart_ll, arrivee_ll, cible_m, amorce,
                        amorce_arrivee, longueur_amorce, longueur_amorce_arrivee,
                        iterations, tolerance, repetition_max, max_points,
-                       ecart_depart, journal, couloirs=None):
+                       ecart_depart, journal, couloirs=None,
+                       deplace_depart=0.0, deplace_arrivee=0.0):
     """Cherche un parcours du depart vers une arrivee distincte.
 
     Meme principe que pour une boucle : la distance demandee s'obtient en
@@ -1947,6 +1945,10 @@ def trace_vers_arrivee(coeur, aretes, coords, index_coeur, depart,
         "qualites": repartition(trajet, aretes, 6),
         "longueur_boucle": longueur,
         "boucle": False,
+        # De combien les points poses ont du etre deplaces pour toucher une
+        # rue : l'interface s'en sert pour replacer le marqueur.
+        "deplace_depart": deplace_depart,
+        "deplace_arrivee": deplace_arrivee,
         "doublement": doublement["longueur"],
         "portions_doublees": len(doublement["portions"]),
         "bouclettes": bouclettes["longueur"],
@@ -2084,7 +2086,7 @@ def genere(lat, lon, cible_m, niveau="normal", caps=16, sommets=(3, 4, 5, 6),
     def accroche(brut, ecart, point, quoi):
         # 1. Deja sur le reseau utile : rien a faire.
         if brut in utiles:
-            return brut, [], 0.0, ecart
+            return brut, [], 0.0, ecart, 0.0
 
         # 2. Sur une voie sans issue qui y mene : on la remonte, et cette
         #    amorce est le seul aller-retour inevitable.
@@ -2093,35 +2095,34 @@ def genere(lat, lon, cible_m, niveau="normal", caps=16, sommets=(3, 4, 5, 6),
             longueur = longueur_trajet(trajet, aretes)
             journal("  amorce depuis l'impasse {} : {:.0f} m (seul "
                     "aller-retour inevitable)".format(quoi, longueur))
-            return noeud, trajet, longueur, ecart
+            return noeud, trajet, longueur, ecart, 0.0
 
-        # 3. Sur un ilot sans issue : aucune rue praticable n'y mene. On peut
-        #    corriger de quelques metres, jamais davantage. Rendre un parcours
-        #    qui commence a deux cents metres de la, sans le dire franchement,
-        #    revient a repondre a une autre question que celle qui est posee.
+        # 3. Sur un ilot sans issue : aucune rue praticable n'y mene. On prend
+        #    la voie reliee au reste la plus proche, et le resultat dit de
+        #    combien le point a ete deplace — laisser croire que le parcours
+        #    part de l'endroit pose serait pire que de le deplacer.
         secours, distance = index_utile.plus_proche(point[0], point[1],
-                                                    rayon_max=1500.0)
-        if secours is not None and distance <= CORRECTION_MAX:
-            journal("  point {} accroche a {:.0f} m : le point pose n'est relie a "
-                    "aucune voie".format(quoi, distance))
-            return secours, [], 0.0, distance
-        raise BoucleIntrouvable(
-            "Le point {} n'est relie a aucune rue praticable : OpenStreetMap "
-            "ne decrit pas de passage entre l'endroit pose et le reste du "
-            "reseau{}".format(quoi,
-                ". Poser le point sur une rue ou un chemin."
-                if secours is None else
-                ". La voie reliee au reste la plus proche est a {:.0f} m — "
-                "deplacer le marqueur jusque-la.".format(distance)))
+                                                    rayon_max=PORTEE_SECOURS)
+        if secours is None:
+            raise BoucleIntrouvable(
+                "Le point {} n'est relie a aucune rue praticable, et aucune "
+                "voie reliee au reste ne se trouve a moins d'un kilometre et "
+                "demi. Poser le point plus pres d'une rue ou d'un chemin."
+                .format(quoi))
+        journal("  point {} deplace de {:.0f} m : l'endroit pose n'est relie a "
+                "aucune rue praticable".format(quoi, distance))
+        return secours, [], 0.0, distance, distance
 
-    depart, amorce, longueur_amorce, ecart_depart = accroche(
+    depart, amorce, longueur_amorce, ecart_depart, deplace_depart = accroche(
         depart_brut, ecart_depart, (lat, lon), "de depart")
 
     # L'arrivee, quand elle differe, recoit le meme traitement.
     noeud_arrivee, amorce_arrivee, longueur_amorce_arrivee = depart, [], 0.0
+    deplace_arrivee = 0.0
     if arrivee is not None:
-        noeud_arrivee, amorce_arrivee, longueur_amorce_arrivee, ecart_arrivee = \
-            accroche(arrivee_brut, ecart_arrivee, arrivee, "d'arrivee")
+        (noeud_arrivee, amorce_arrivee, longueur_amorce_arrivee, ecart_arrivee,
+         deplace_arrivee) = accroche(arrivee_brut, ecart_arrivee, arrivee,
+                                     "d'arrivee")
         journal("  arrivee accrochee a {:.0f} m du point demande"
                 .format(ecart_arrivee))
 
@@ -2142,7 +2143,8 @@ def genere(lat, lon, cible_m, niveau="normal", caps=16, sommets=(3, 4, 5, 6),
             coeur, aretes, coords, index_coeur, depart, noeud_arrivee,
             (lat, lon), arrivee, cible_m, amorce, amorce_arrivee,
             longueur_amorce, longueur_amorce_arrivee, iterations, tolerance,
-            repetition_max, max_points, ecart_depart, journal, couloirs)
+            repetition_max, max_points, ecart_depart, journal, couloirs,
+            deplace_depart, deplace_arrivee)
 
     budget = max(cible_m - 2 * longueur_amorce, cible_m * 0.3)
     journal("4/5 Recherche de la boucle ({} orientations x {} formes)"
@@ -2245,6 +2247,10 @@ def genere(lat, lon, cible_m, niveau="normal", caps=16, sommets=(3, 4, 5, 6),
         "qualites": repartition(trajet, aretes, 6),
         "longueur_boucle": longueur,
         "boucle": True,
+        # De combien les points poses ont du etre deplaces pour toucher une
+        # rue : l'interface s'en sert pour replacer le marqueur.
+        "deplace_depart": deplace_depart,
+        "deplace_arrivee": deplace_arrivee,
         "doublement": doublement["longueur"],
         "portions_doublees": len(doublement["portions"]),
         "bouclettes": bouclettes["longueur"],

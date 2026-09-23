@@ -346,6 +346,7 @@ function telecharge(contenu, nomFichier, type) {
 function dessine(r) {
   trace = L.polyline(r.points, { color: "#e8590c", weight: 4.5, opacity: .92 })
            .addTo(carte);
+  replaceMarqueurs(r);
 
   // Une fois le parcours trouve, c'est la carte qu'on veut voir : sur
   // telephone la feuille se replie et garde l'essentiel sous les yeux.
@@ -373,6 +374,14 @@ function dessine(r) {
   html += `<tr><td>Aller-retour</td><td class="${propre ? "bon" : ""}">`
         + `${propre ? "aucun" : Math.round(r.repetee) + " m"}</td></tr>`;
   html += `<tr><td>Départ à</td><td>${Math.round(r.accroche)} m du point posé</td></tr>`;
+  if (r.deplaceDepart > 0 || r.deplaceArrivee > 0) {
+    const quoi = r.deplaceDepart > 0 && r.deplaceArrivee > 0 ? "Les deux points ont été déplacés"
+      : r.deplaceDepart > 0 ? `Le départ a été déplacé de ${Math.round(r.deplaceDepart)} m`
+      : `L'arrivée a été déplacée de ${Math.round(r.deplaceArrivee)} m`;
+    html += `</table><p class="avertissement">${quoi} : l'endroit posé n'est `
+          + "relié à aucune rue praticable dans OpenStreetMap. Le marqueur a "
+          + "suivi, pour que la carte montre le vrai départ.</p><table>";
+  }
   html += `<tr><td>Portions longées</td><td class="${r.doublement > 0 ? "" : "bon"}">`
         + `${r.doublement > 0 ? Math.round(r.doublement) + " m" : "aucune"}</td></tr>`;
   html += `<tr><td>Petites boucles</td><td class="${r.nbBouclettes > 0 ? "" : "bon"}">`
@@ -417,6 +426,27 @@ function dessine(r) {
     telecharge(r.geojson, `${nomFichier}.geojson`, "application/geo+json");
 
   afficheRelief(r);
+}
+
+/**
+ * Replace les marqueurs sur le parcours rendu.
+ *
+ * Quand le point pose ne touche aucune rue — une adresse qui tombe au milieu
+ * d'un site, une geolocalisation dans une cour — le moteur accroche le
+ * parcours a la voie reliee au reste la plus proche. Laisser le marqueur ou il
+ * etait ferait croire que le trace part de la : il suit donc le parcours, et
+ * le bilan dit de combien.
+ */
+function replaceMarqueurs(r) {
+  const premier = r.points[0];
+  const dernier = r.points[r.points.length - 1];
+  if (marqueur && r.deplaceDepart > 0) {
+    marqueur.setLatLng(L.latLng(premier[0], premier[1]));
+  }
+  if (marqueurArrivee && caseArrivee.checked && r.deplaceArrivee > 0) {
+    marqueurArrivee.setLatLng(L.latLng(dernier[0], dernier[1]));
+  }
+  if (r.deplaceDepart > 0 || r.deplaceArrivee > 0) majCoord(true);
 }
 
 // --- relief ---------------------------------------------------------------

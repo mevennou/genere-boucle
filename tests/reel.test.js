@@ -124,27 +124,43 @@ test("reseau reel : un depart pose a cote du reseau y est raccroche", async () =
   }
 });
 
-test("reseau reel : un depart vraiment coupe est refuse, pas deplace", async () => {
-  // Le defaut a corriger : le moteur rendait un parcours commencant a 175 m
-  // du marqueur, sans que la carte montre le moindre lien entre les deux.
-  await assert.rejects(
-    genere({ ...POSE_COUPEE, cibleM: 12000, niveau: "normal", source }),
-    (erreur) => {
-      assert.ok(erreur instanceof BoucleIntrouvable);
-      assert.match(erreur.message, /n'est relie a aucune rue praticable/);
-      // Le message doit dire quoi faire, et de combien.
-      assert.match(erreur.message, /1[0-9][0-9] m/);
-      assert.match(erreur.message, /deplacer le marqueur/);
-      return true;
-    });
+test("reseau reel : un depart coupe du reseau est deplace, et le dit", async () => {
+  // Le defaut a corriger : le moteur rendait un parcours commencant a 175 m du
+  // marqueur, qui lui restait sur place. La carte laissait donc croire que le
+  // parcours partait d'un endroit d'ou il ne partait pas.
+  const r = await genere({ ...POSE_COUPEE, cibleM: 5000, niveau: "normal", source });
+
+  assert.ok(r.deplaceDepart > 100,
+    `deplacement annonce : ${r.deplaceDepart.toFixed(0)} m`);
+  // Ce que le resultat annonce est bien ce qu'il fait.
+  const reel = distanceHaversine(POSE_COUPEE.lat, POSE_COUPEE.lon,
+                                 r.points[0][0], r.points[0][1]);
+  assert.ok(Math.abs(reel - r.deplaceDepart) < 1,
+    `annonce ${r.deplaceDepart.toFixed(0)} m, reel ${reel.toFixed(0)} m`);
+  assert.ok(Math.abs(reel - r.accroche) < 1, "l'accroche dit la meme chose");
+  // Et un parcours utilisable en sort.
+  assert.ok(r.distance > 3500, `${(r.distance / 1000).toFixed(2)} km rendus`);
 });
 
-test("reseau reel : une arrivee coupee est refusee de la meme facon", async () => {
+test("reseau reel : un depart pose sur une rue n'est jamais deplace", async () => {
+  // Le deplacement est un rattrapage, pas une habitude : un point pose au bon
+  // endroit doit rester ou il est.
+  const r = await genere({ lat: 48.3602, lon: -4.5712, cibleM: 5000,
+                           niveau: "normal", source });
+  assert.equal(r.deplaceDepart, 0);
+  assert.equal(r.deplaceArrivee, 0);
+});
+
+test("reseau reel : une arrivee coupee est deplacee de la meme facon", async () => {
   // L'arrivee vient du meme champ de recherche : elle merite le meme egard.
-  await assert.rejects(
-    genere({ ...POSE_PROCHE, arrivee: [POSE_COUPEE.lat, POSE_COUPEE.lon],
-             cibleM: 5000, niveau: "normal", source }),
-    (erreur) => /n'est relie a aucune rue praticable/.test(erreur.message));
+  const r = await genere({ ...POSE_PROCHE, arrivee: [POSE_COUPEE.lat, POSE_COUPEE.lon],
+                           cibleM: 5000, niveau: "normal", source });
+  assert.equal(r.boucle, false);
+  assert.ok(r.deplaceArrivee > 100, `arrivee deplacee de ${r.deplaceArrivee.toFixed(0)} m`);
+  const dernier = r.points[r.points.length - 1];
+  const reel = distanceHaversine(POSE_COUPEE.lat, POSE_COUPEE.lon, dernier[0], dernier[1]);
+  assert.ok(Math.abs(reel - r.deplaceArrivee) < 1,
+    `annonce ${r.deplaceArrivee.toFixed(0)} m, reel ${reel.toFixed(0)} m`);
 });
 
 test("reseau reel : un point vraiment hors de portee est refuse clairement", async () => {
