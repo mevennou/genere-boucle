@@ -694,6 +694,43 @@ def supprime_impasses(aretes, adjacence):
     return reduite
 
 
+# En deca, une composante du reseau ne peut pas porter un parcours : ce n'est
+# pas un quartier, c'est un ilot.
+MIN_NOEUDS_COEUR = 20
+
+
+def composantes_utiles(adjacence, aretes, min_noeuds=MIN_NOEUDS_COEUR,
+                       min_longueur=0.0):
+    """Noeuds appartenant a une composante capable de porter un parcours.
+
+    Le reseau praticable n'est pas d'un seul tenant : quelques allees d'un
+    campus, un lotissement ferme, un sentier coupe par une voie rapide forment
+    des ilots de cinq ou vingt noeuds, sans lien avec le reste. Accrocher un
+    depart sur l'un d'eux condamne la recherche avant qu'elle commence, alors
+    que le vrai reseau passe parfois a trente metres de la.
+    """
+    utiles = set()
+    vus = set()
+    for depart in adjacence:
+        if depart in vus:
+            continue
+        membres = []
+        pile = [depart]
+        vus.add(depart)
+        longueur = 0.0
+        while pile:
+            noeud = pile.pop()
+            membres.append(noeud)
+            for voisin, arete in adjacence.get(noeud, ()):
+                longueur += aretes[arete][2]      # chaque arete vue deux fois
+                if voisin not in vus:
+                    vus.add(voisin)
+                    pile.append(voisin)
+        if len(membres) >= min_noeuds and longueur / 2 >= min_longueur:
+            utiles.update(membres)
+    return utiles
+
+
 def composante(adjacence, source):
     """Noeuds atteignables depuis source (parcours en largeur)."""
     vus = {source}
@@ -2023,30 +2060,56 @@ def genere(lat, lon, cible_m, niveau="normal", caps=16, sommets=(3, 4, 5, 6),
                 "regroupees, pour qu'aller par l'une et revenir par l'autre "
                 "compte comme un aller-retour".format(couloirs.nb_jumelages))
 
-    if depart_brut in coeur:
-        depart, amorce, longueur_amorce = depart_brut, [], 0.0
-    else:
-        # Le depart est sur une voie sans issue : on rejoint le premier point
-        # du reseau maille, et cette amorce est le seul aller-retour inevitable.
-        depart, amorce = rejoint_coeur(adjacence, aretes, depart_brut, coeur)
-        if depart is None:
-            raise BoucleIntrouvable("Depart isole du reseau praticable.")
-        longueur_amorce = longueur_trajet(amorce, aretes)
-        journal("  amorce depuis l'impasse du depart : {:.0f} m (seul "
-                "aller-retour inevitable)".format(longueur_amorce))
+    # Le reseau n'est pas d'un seul tenant. On retient les composantes capables
+    # de porter le parcours demande, et c'est a l'une d'elles que les points
+    # s'accrochent : le noeud le plus proche a vol d'oiseau appartient souvent
+    # a un ilot — les allees d'un campus, un lotissement ferme — qui ne mene
+    # nulle part. C'est ce qui se produisait des qu'une adresse ou une
+    # geolocalisation posait le depart au milieu d'un site plutot qu'une rue.
+    utiles = composantes_utiles(coeur, aretes, min_longueur=cible_m * 0.5)
+    if not utiles:
+        utiles = composantes_utiles(coeur, aretes)
+    if not utiles:
+        raise BoucleIntrouvable("Reseau maille trop petit autour du depart.")
+    index_utile = IndexSpatial(coords, utiles)
 
-    # L'arrivee, quand elle differe, recoit la meme amorce que le depart si
-    # elle se trouve au fond d'une impasse.
+    def accroche(brut, ecart, point, quoi):
+        # 1. Deja sur le reseau utile : rien a faire.
+        if brut in utiles:
+            return brut, [], 0.0, ecart
+
+        # 2. Sur une voie sans issue qui y mene : on la remonte, et cette
+        #    amorce est le seul aller-retour inevitable.
+        noeud, trajet = rejoint_coeur(adjacence, aretes, brut, utiles)
+        if noeud is not None:
+            longueur = longueur_trajet(trajet, aretes)
+            journal("  amorce depuis l'impasse {} : {:.0f} m (seul "
+                    "aller-retour inevitable)".format(quoi, longueur))
+            return noeud, trajet, longueur, ecart
+
+        # 3. Sur un ilot sans issue. Plutot que de refuser, on accroche au
+        #    point utilisable le plus proche et on dit de combien on a deplace.
+        # Meme portee que la recherche initiale : deplacer un depart de trois
+        # kilometres sans rien dire serait pire que de refuser.
+        secours, distance = index_utile.plus_proche(point[0], point[1],
+                                                    rayon_max=1500.0)
+        if secours is None:
+            raise BoucleIntrouvable(
+                "Aucun reseau praticable relie ce point {} au reste. Essayer "
+                "un point sur une rue, ou un niveau d'exigence moins severe."
+                .format(quoi))
+        journal("  {} isole du reseau : deplace de {:.0f} m pour rejoindre une "
+                "voie reliee au reste".format(quoi, distance))
+        return secours, [], 0.0, distance
+
+    depart, amorce, longueur_amorce, ecart_depart = accroche(
+        depart_brut, ecart_depart, (lat, lon), "du depart")
+
+    # L'arrivee, quand elle differe, recoit le meme traitement.
     noeud_arrivee, amorce_arrivee, longueur_amorce_arrivee = depart, [], 0.0
     if arrivee is not None:
-        if arrivee_brut in coeur:
-            noeud_arrivee = arrivee_brut
-        else:
-            noeud_arrivee, amorce_arrivee = rejoint_coeur(
-                adjacence, aretes, arrivee_brut, coeur)
-            if noeud_arrivee is None:
-                raise BoucleIntrouvable("Arrivee isolee du reseau praticable.")
-            longueur_amorce_arrivee = longueur_trajet(amorce_arrivee, aretes)
+        noeud_arrivee, amorce_arrivee, longueur_amorce_arrivee, ecart_arrivee = \
+            accroche(arrivee_brut, ecart_arrivee, arrivee, "de l'arrivee")
         journal("  arrivee accrochee a {:.0f} m du point demande"
                 .format(ecart_arrivee))
 

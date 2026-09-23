@@ -202,6 +202,43 @@ export function composante(adjacence, source) {
 }
 
 /** Restreint une adjacence a un ensemble de noeuds. */
+/**
+ * Noeuds appartenant a une composante capable de porter un parcours.
+ *
+ * Le reseau praticable n'est pas d'un seul tenant : quelques allees d'un
+ * campus, un lotissement ferme, un sentier coupe par une voie rapide forment
+ * des ilots de cinq ou vingt noeuds, sans lien avec le reste. Accrocher un
+ * depart sur l'un d'eux condamne la recherche avant qu'elle commence, alors
+ * que le vrai reseau passe parfois a trente metres de la.
+ *
+ * Une composante est retenue si elle compte au moins `minNoeuds` noeuds et
+ * totalise au moins `minLongueur` metres de voies.
+ */
+export function composantesUtiles(adjacence, aretes, nbNoeuds,
+                                  { minNoeuds = 20, minLongueur = 0 } = {}) {
+  const utiles = new Set();
+  const vus = new Uint8Array(nbNoeuds);
+  for (let depart = 0; depart < nbNoeuds; depart++) {
+    if (vus[depart] || !adjacence[depart]) continue;
+    const membres = [];
+    const pile = [depart];
+    vus[depart] = 1;
+    let longueur = 0;
+    while (pile.length) {
+      const noeud = pile.pop();
+      membres.push(noeud);
+      for (const [voisin, arete] of (adjacence[noeud] || [])) {
+        longueur += aretes[arete].longueur;      // chaque arete vue deux fois
+        if (!vus[voisin]) { vus[voisin] = 1; pile.push(voisin); }
+      }
+    }
+    if (membres.length >= minNoeuds && longueur / 2 >= minLongueur) {
+      for (const noeud of membres) utiles.add(noeud);
+    }
+  }
+  return utiles;
+}
+
 export function restreint(adjacence, noeuds, nbNoeuds) {
   const reduite = new Array(nbNoeuds);
   for (const n of noeuds) {

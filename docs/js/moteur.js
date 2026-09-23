@@ -6,7 +6,7 @@ import { distanceHaversine } from "./geo.js";
 import { noeudsInfranchissables, LIBELLES_QUALITE } from "./regles.js";
 import {
   construitGrapheBrut, contracte, supprimeImpasses, composante, restreint,
-  construitCSR, IndexSpatial,
+  construitCSR, IndexSpatial, composantesUtiles,
 } from "./graphe.js";
 import { Routeur } from "./routage.js";
 import {
@@ -28,6 +28,10 @@ const km = (m) => (m / 1000).toFixed(2);
 // plus court chemin direct — qui ne double rien par construction — devienne
 // une reponse acceptable a « quinze kilometres ».
 export const MARGE_REPLI = 0.20;
+
+// En deca, une composante du reseau ne peut pas porter un parcours : ce n'est
+// pas un quartier, c'est un ilot.
+const MIN_NOEUDS_COEUR = 20;
 
 // Combien de candidats le controle geometrique examine, du meilleur au moins
 // bon. Les traces sans defaut ne sont pas forcement les mieux classes sur la
@@ -165,7 +169,7 @@ export async function genere({
   const avecAretes = [];
   for (let n = 0; n < nbNoeuds; n++) if (brut[n]) avecAretes.push(n);
   const indexComplet = new IndexSpatial(latN, lonN, avecAretes);
-  const [departBrut, ecartDepart] = indexComplet.plusProche(lat, lon);
+  let [departBrut, ecartDepart] = indexComplet.plusProche(lat, lon);
   if (departBrut === null) {
     throw new BoucleIntrouvable(
       "Aucun chemin praticable a proximite du point de depart choisi.");
@@ -202,30 +206,64 @@ export async function genere({
   const routeur = new Routeur(construitCSR(adjacence, nbNoeuds), aretes,
                               latN, lonN, nbNoeuds, couloir, decalage, alignement);
 
-  let depart, amorce = [], longueurAmorce = 0.0;
-  if (coeur[departBrut]) {
-    depart = departBrut;
-  } else {
-    // Le depart est sur une voie sans issue : on rejoint le premier point du
-    // reseau maille, et cette amorce est le seul aller-retour inevitable.
-    const [noeud, trajet] = routeur.rejointCoeur(adjacence, departBrut, (n) => Boolean(coeur[n]));
-    if (noeud === null) throw new BoucleIntrouvable("Depart isole du reseau praticable.");
-    depart = noeud; amorce = trajet;
-    longueurAmorce = routeur.longueurTrajet(amorce);
-    journal(`  amorce depuis l'impasse du depart : ${longueurAmorce.toFixed(0)} m `
-          + "(seul aller-retour inevitable)");
+  // Le reseau n'est pas d'un seul tenant. On retient les composantes capables
+  // de porter le parcours demande, et c'est a l'une d'elles que les points
+  // s'accrochent : le noeud le plus proche a vol d'oiseau appartient souvent a
+  // un ilot — les allees d'un campus, un lotissement ferme — qui ne mene nulle
+  // part. C'est ce qui se produisait des qu'une adresse ou une geolocalisation
+  // posait le depart au milieu d'un site plutot que sur une rue.
+  let utiles = composantesUtiles(coeur, aretes, nbNoeuds,
+    { minNoeuds: MIN_NOEUDS_COEUR, minLongueur: cibleM * 0.5 });
+  if (!utiles.size) {
+    utiles = composantesUtiles(coeur, aretes, nbNoeuds, { minNoeuds: MIN_NOEUDS_COEUR });
   }
+  if (!utiles.size) {
+    throw new BoucleIntrouvable("Reseau maille trop petit autour du depart.");
+  }
+  const indexUtile = new IndexSpatial(latN, lonN, utiles);
+
+  const accroche = (brut, ecart, point, quoi) => {
+    // 1. Deja sur le reseau utile : rien a faire.
+    if (utiles.has(brut)) return { noeud: brut, amorce: [], longueur: 0, ecart };
+
+    // 2. Sur une voie sans issue qui y mene : on la remonte, et cette amorce
+    //    est le seul aller-retour inevitable.
+    const [noeud, trajet] = routeur.rejointCoeur(adjacence, brut, (n) => utiles.has(n));
+    if (noeud !== null) {
+      const longueur = routeur.longueurTrajet(trajet);
+      journal(`  amorce depuis l'impasse ${quoi} : ${longueur.toFixed(0)} m `
+            + "(seul aller-retour inevitable)");
+      return { noeud, amorce: trajet, longueur, ecart };
+    }
+
+    // 3. Sur un ilot sans issue. Plutot que de refuser, on accroche au point
+    //    utilisable le plus proche et on dit de combien on a deplace.
+    // Meme portee que la recherche initiale : deplacer un depart de trois
+    // kilometres sans rien dire serait pire que de refuser.
+    const [secours, distance] = indexUtile.plusProche(point[0], point[1], 1500);
+    if (secours === null) {
+      throw new BoucleIntrouvable(
+        `Aucun reseau praticable relie ce point ${quoi} au reste. Essayer un `
+        + "point sur une rue, ou un niveau d'exigence moins severe.");
+    }
+    journal(`  ${quoi} isole du reseau : deplace de ${distance.toFixed(0)} m `
+          + "pour rejoindre une voie reliee au reste");
+    return { noeud: secours, amorce: [], longueur: 0, ecart: distance };
+  };
+
+  const pose = accroche(departBrut, ecartDepart, [lat, lon], "du depart");
+  const depart = pose.noeud;
+  const amorce = pose.amorce;
+  const longueurAmorce = pose.longueur;
+  ecartDepart = pose.ecart;
 
   let noeudArrivee = depart, amorceArrivee = [], longueurAmorceArrivee = 0.0;
   if (arrivee) {
-    if (coeur[arriveeBrut]) {
-      noeudArrivee = arriveeBrut;
-    } else {
-      const [noeud, trajet] = routeur.rejointCoeur(adjacence, arriveeBrut, (n) => Boolean(coeur[n]));
-      if (noeud === null) throw new BoucleIntrouvable("Arrivee isolee du reseau praticable.");
-      noeudArrivee = noeud; amorceArrivee = trajet;
-      longueurAmorceArrivee = routeur.longueurTrajet(amorceArrivee);
-    }
+    const fin = accroche(arriveeBrut, ecartArrivee, arrivee, "de l'arrivee");
+    noeudArrivee = fin.noeud;
+    amorceArrivee = fin.amorce;
+    longueurAmorceArrivee = fin.longueur;
+    ecartArrivee = fin.ecart;
     journal(`  arrivee accrochee a ${ecartArrivee.toFixed(0)} m du point demande`);
   }
 

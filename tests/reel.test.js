@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import { lecture } from "./utils.js";
 import { genere, BoucleIntrouvable } from "../docs/js/moteur.js";
 import { mesureBouclettes } from "../docs/js/controle.js";
+import { distanceHaversine } from "../docs/js/geo.js";
 
 const { voies } = lecture("brest.json");
 const source = {
@@ -85,4 +86,59 @@ test("reseau reel : la mesure rendue decrit bien le trace rendu", async () => {
     assert.equal(r.nbBouclettes, mesure.nombre, "nombre de boucles annonce");
     assert.ok(Math.abs(r.bouclettes - mesure.longueur) < 1e-6, "longueur annoncee");
   }
+});
+
+// --- accrochage du depart et de l'arrivee ---------------------------------
+//
+// Une adresse cherchee ou une geolocalisation ne tombe pas sur une rue : elle
+// tombe au milieu d'un site, d'un campus, d'un lotissement. Le noeud le plus
+// proche a vol d'oiseau y appartient souvent a un ilot de quelques allees,
+// sans lien avec le reste du reseau. Le moteur refusait alors de chercher,
+// alors qu'une voie reliee au reste passait a trente metres.
+//
+// Les deux points ci-dessous sont ceux qui ont fait echouer le site : le
+// premier rendait « Depart isole du reseau praticable », le second « Reseau
+// maille trop petit autour du depart ». Ils ne sont pas inventes.
+const POSES_DIFFICILES = [
+  { nom: "adresse au milieu d'un site", lat: 48.361148, lon: -4.572282 },
+  { nom: "geolocalisation sur un campus", lat: 48.357823, lon: -4.570741 },
+];
+
+test("reseau reel : un depart pose hors rue s'accroche au reseau", async () => {
+  for (const { nom, lat, lon } of POSES_DIFFICILES) {
+    for (const km of [4, 5]) {
+      const r = await genere({ lat, lon, cibleM: km * 1000, niveau: "normal", source });
+      assert.ok(r.distance > km * 1000 * 0.7,
+        `${nom}, ${km} km : ${(r.distance / 1000).toFixed(2)} km rendus`);
+
+      // Le trace part bien de la ou le moteur dit qu'il part, et ce report
+      // reste raisonnable : on rapproche le depart, on ne le teleporte pas.
+      const depart = r.points[0];
+      const ecart = distanceHaversine(lat, lon, depart[0], depart[1]);
+      assert.ok(ecart < 400, `${nom} : depart deplace de ${ecart.toFixed(0)} m`);
+      assert.ok(Math.abs(ecart - r.accroche) < 25,
+        `${nom} : ecart annonce ${r.accroche.toFixed(0)} m, reel ${ecart.toFixed(0)} m`);
+    }
+  }
+});
+
+test("reseau reel : une arrivee posee hors rue s'accroche aussi", async () => {
+  // Meme traitement pour l'arrivee : elle vient du meme champ de recherche.
+  const [a, b] = POSES_DIFFICILES;
+  const r = await genere({
+    lat: a.lat, lon: a.lon, arrivee: [b.lat, b.lon],
+    cibleM: 5000, niveau: "normal", source,
+  });
+  assert.equal(r.boucle, false);
+  const dernier = r.points[r.points.length - 1];
+  assert.ok(distanceHaversine(b.lat, b.lon, dernier[0], dernier[1]) < 400,
+    "l'arrivee doit rester proche du point demande");
+  assert.ok(r.distance > 3500, `${(r.distance / 1000).toFixed(2)} km rendus`);
+});
+
+test("reseau reel : un point vraiment hors de portee est refuse clairement", async () => {
+  // En pleine mer, il n'y a rien a accrocher : il faut le dire, pas inventer.
+  await assert.rejects(
+    genere({ lat: 48.330, lon: -4.560, cibleM: 5000, niveau: "normal", source }),
+    (e) => e instanceof BoucleIntrouvable);
 });
