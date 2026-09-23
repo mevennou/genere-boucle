@@ -33,6 +33,14 @@ export const MARGE_REPLI = 0.20;
 // pas un quartier, c'est un ilot.
 const MIN_NOEUDS_COEUR = 20;
 
+// De combien on s'autorise a corriger un point pose sur un ilot sans issue.
+// Le moteur accroche toujours le point a un noeud du graphe, a quelques
+// metres pres : en deca de cette limite, la correction ne se distingue pas de
+// cet accrochage ordinaire. Au-dela, ce n'est plus une correction, c'est un
+// autre depart — et il vaut mieux le dire que rendre un parcours qui commence
+// ailleurs que la ou on se trouve.
+const CORRECTION_MAX = 50;
+
 // Combien de candidats le controle geometrique examine, du meilleur au moins
 // bon. Les traces sans defaut ne sont pas forcement les mieux classes sur la
 // distance : en regarder une poignee ne suffisait pas a en trouver un.
@@ -236,22 +244,26 @@ export async function genere({
       return { noeud, amorce: trajet, longueur, ecart };
     }
 
-    // 3. Sur un ilot sans issue. Plutot que de refuser, on accroche au point
-    //    utilisable le plus proche et on dit de combien on a deplace.
-    // Meme portee que la recherche initiale : deplacer un depart de trois
-    // kilometres sans rien dire serait pire que de refuser.
+    // 3. Sur un ilot sans issue : aucune rue praticable n'y mene. On peut
+    //    corriger de quelques metres, jamais davantage. Rendre un parcours
+    //    qui commence a deux cents metres de la, sans le dire franchement,
+    //    revient a repondre a une autre question que celle qui est posee.
     const [secours, distance] = indexUtile.plusProche(point[0], point[1], 1500);
-    if (secours === null) {
-      throw new BoucleIntrouvable(
-        `Aucun reseau praticable relie ce point ${quoi} au reste. Essayer un `
-        + "point sur une rue, ou un niveau d'exigence moins severe.");
+    if (secours !== null && distance <= CORRECTION_MAX) {
+      journal(`  point ${quoi} accroche a ${distance.toFixed(0)} m : le point pose `
+            + "n'est relie a aucune voie");
+      return { noeud: secours, amorce: [], longueur: 0, ecart: distance };
     }
-    journal(`  ${quoi} isole du reseau : deplace de ${distance.toFixed(0)} m `
-          + "pour rejoindre une voie reliee au reste");
-    return { noeud: secours, amorce: [], longueur: 0, ecart: distance };
+    throw new BoucleIntrouvable(
+      `Le point ${quoi} n'est relie a aucune rue praticable : OpenStreetMap `
+      + "ne decrit pas de passage entre l'endroit pose et le reste du reseau"
+      + (secours === null
+         ? ". Poser le point sur une rue ou un chemin."
+         : `. La voie reliee au reste la plus proche est a `
+           + `${distance.toFixed(0)} m — deplacer le marqueur jusque-la.`));
   };
 
-  const pose = accroche(departBrut, ecartDepart, [lat, lon], "du depart");
+  const pose = accroche(departBrut, ecartDepart, [lat, lon], "de depart");
   const depart = pose.noeud;
   const amorce = pose.amorce;
   const longueurAmorce = pose.longueur;
@@ -259,7 +271,7 @@ export async function genere({
 
   let noeudArrivee = depart, amorceArrivee = [], longueurAmorceArrivee = 0.0;
   if (arrivee) {
-    const fin = accroche(arriveeBrut, ecartArrivee, arrivee, "de l'arrivee");
+    const fin = accroche(arriveeBrut, ecartArrivee, arrivee, "d'arrivee");
     noeudArrivee = fin.noeud;
     amorceArrivee = fin.amorce;
     longueurAmorceArrivee = fin.longueur;

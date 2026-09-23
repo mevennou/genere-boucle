@@ -93,47 +93,58 @@ test("reseau reel : la mesure rendue decrit bien le trace rendu", async () => {
 // Une adresse cherchee ou une geolocalisation ne tombe pas sur une rue : elle
 // tombe au milieu d'un site, d'un campus, d'un lotissement. Le noeud le plus
 // proche a vol d'oiseau y appartient souvent a un ilot de quelques allees,
-// sans lien avec le reste du reseau. Le moteur refusait alors de chercher,
-// alors qu'une voie reliee au reste passait a trente metres.
+// sans lien avec le reste du reseau.
 //
-// Les deux points ci-dessous sont ceux qui ont fait echouer le site : le
-// premier rendait « Depart isole du reseau praticable », le second « Reseau
-// maille trop petit autour du depart ». Ils ne sont pas inventes.
-const POSES_DIFFICILES = [
-  { nom: "adresse au milieu d'un site", lat: 48.361148, lon: -4.572282 },
-  { nom: "geolocalisation sur un campus", lat: 48.357823, lon: -4.570741 },
-];
+// Deux situations, deux reponses. Quand le reseau passe a quelques metres,
+// c'est un trou de cartographie : on corrige sans ceremonie, comme on accroche
+// deja tout point au noeud le plus proche. Quand il passe a deux cents metres,
+// ce n'est plus une correction : rendre un parcours qui commence la-bas
+// reviendrait a repondre a une autre question. Il faut le dire.
+//
+// Les deux points ci-dessous sont ceux qui ont fait echouer le site. Ils ne
+// sont pas inventes.
+const POSE_PROCHE = { lat: 48.361148, lon: -4.572282 };   // reseau a 29 m
+const POSE_COUPEE = { lat: 48.357823, lon: -4.570741 };   // reseau a 175 m
 
-test("reseau reel : un depart pose hors rue s'accroche au reseau", async () => {
-  for (const { nom, lat, lon } of POSES_DIFFICILES) {
-    for (const km of [4, 5]) {
-      const r = await genere({ lat, lon, cibleM: km * 1000, niveau: "normal", source });
-      assert.ok(r.distance > km * 1000 * 0.7,
-        `${nom}, ${km} km : ${(r.distance / 1000).toFixed(2)} km rendus`);
+test("reseau reel : un depart pose a cote du reseau y est raccroche", async () => {
+  for (const km of [4, 5]) {
+    const r = await genere({ ...POSE_PROCHE, cibleM: km * 1000,
+                             niveau: "normal", source });
+    assert.ok(r.distance > km * 1000 * 0.7,
+      `${km} km : ${(r.distance / 1000).toFixed(2)} km rendus`);
 
-      // Le trace part bien de la ou le moteur dit qu'il part, et ce report
-      // reste raisonnable : on rapproche le depart, on ne le teleporte pas.
-      const depart = r.points[0];
-      const ecart = distanceHaversine(lat, lon, depart[0], depart[1]);
-      assert.ok(ecart < 400, `${nom} : depart deplace de ${ecart.toFixed(0)} m`);
-      assert.ok(Math.abs(ecart - r.accroche) < 25,
-        `${nom} : ecart annonce ${r.accroche.toFixed(0)} m, reel ${ecart.toFixed(0)} m`);
-    }
+    // Le trace part de la ou le moteur dit qu'il part, et la correction reste
+    // de l'ordre de l'accrochage ordinaire.
+    const depart = r.points[0];
+    const ecart = distanceHaversine(POSE_PROCHE.lat, POSE_PROCHE.lon,
+                                    depart[0], depart[1]);
+    assert.ok(ecart <= 50, `depart deplace de ${ecart.toFixed(0)} m`);
+    assert.ok(Math.abs(ecart - r.accroche) < 1,
+      `ecart annonce ${r.accroche.toFixed(0)} m, reel ${ecart.toFixed(0)} m`);
   }
 });
 
-test("reseau reel : une arrivee posee hors rue s'accroche aussi", async () => {
-  // Meme traitement pour l'arrivee : elle vient du meme champ de recherche.
-  const [a, b] = POSES_DIFFICILES;
-  const r = await genere({
-    lat: a.lat, lon: a.lon, arrivee: [b.lat, b.lon],
-    cibleM: 5000, niveau: "normal", source,
-  });
-  assert.equal(r.boucle, false);
-  const dernier = r.points[r.points.length - 1];
-  assert.ok(distanceHaversine(b.lat, b.lon, dernier[0], dernier[1]) < 400,
-    "l'arrivee doit rester proche du point demande");
-  assert.ok(r.distance > 3500, `${(r.distance / 1000).toFixed(2)} km rendus`);
+test("reseau reel : un depart vraiment coupe est refuse, pas deplace", async () => {
+  // Le defaut a corriger : le moteur rendait un parcours commencant a 175 m
+  // du marqueur, sans que la carte montre le moindre lien entre les deux.
+  await assert.rejects(
+    genere({ ...POSE_COUPEE, cibleM: 12000, niveau: "normal", source }),
+    (erreur) => {
+      assert.ok(erreur instanceof BoucleIntrouvable);
+      assert.match(erreur.message, /n'est relie a aucune rue praticable/);
+      // Le message doit dire quoi faire, et de combien.
+      assert.match(erreur.message, /1[0-9][0-9] m/);
+      assert.match(erreur.message, /deplacer le marqueur/);
+      return true;
+    });
+});
+
+test("reseau reel : une arrivee coupee est refusee de la meme facon", async () => {
+  // L'arrivee vient du meme champ de recherche : elle merite le meme egard.
+  await assert.rejects(
+    genere({ ...POSE_PROCHE, arrivee: [POSE_COUPEE.lat, POSE_COUPEE.lon],
+             cibleM: 5000, niveau: "normal", source }),
+    (erreur) => /n'est relie a aucune rue praticable/.test(erreur.message));
 });
 
 test("reseau reel : un point vraiment hors de portee est refuse clairement", async () => {

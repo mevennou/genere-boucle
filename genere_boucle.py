@@ -698,6 +698,14 @@ def supprime_impasses(aretes, adjacence):
 # pas un quartier, c'est un ilot.
 MIN_NOEUDS_COEUR = 20
 
+# De combien on s'autorise a corriger un point pose sur un ilot sans issue.
+# Le moteur accroche toujours le point a un noeud du graphe, a quelques metres
+# pres : en deca de cette limite, la correction ne se distingue pas de cet
+# accrochage ordinaire. Au-dela, ce n'est plus une correction, c'est un autre
+# depart — et il vaut mieux le dire que rendre un parcours qui commence
+# ailleurs que la ou on se trouve.
+CORRECTION_MAX = 50.0
+
 
 def composantes_utiles(adjacence, aretes, min_noeuds=MIN_NOEUDS_COEUR,
                        min_longueur=0.0):
@@ -2087,29 +2095,33 @@ def genere(lat, lon, cible_m, niveau="normal", caps=16, sommets=(3, 4, 5, 6),
                     "aller-retour inevitable)".format(quoi, longueur))
             return noeud, trajet, longueur, ecart
 
-        # 3. Sur un ilot sans issue. Plutot que de refuser, on accroche au
-        #    point utilisable le plus proche et on dit de combien on a deplace.
-        # Meme portee que la recherche initiale : deplacer un depart de trois
-        # kilometres sans rien dire serait pire que de refuser.
+        # 3. Sur un ilot sans issue : aucune rue praticable n'y mene. On peut
+        #    corriger de quelques metres, jamais davantage. Rendre un parcours
+        #    qui commence a deux cents metres de la, sans le dire franchement,
+        #    revient a repondre a une autre question que celle qui est posee.
         secours, distance = index_utile.plus_proche(point[0], point[1],
                                                     rayon_max=1500.0)
-        if secours is None:
-            raise BoucleIntrouvable(
-                "Aucun reseau praticable relie ce point {} au reste. Essayer "
-                "un point sur une rue, ou un niveau d'exigence moins severe."
-                .format(quoi))
-        journal("  {} isole du reseau : deplace de {:.0f} m pour rejoindre une "
-                "voie reliee au reste".format(quoi, distance))
-        return secours, [], 0.0, distance
+        if secours is not None and distance <= CORRECTION_MAX:
+            journal("  point {} accroche a {:.0f} m : le point pose n'est relie a "
+                    "aucune voie".format(quoi, distance))
+            return secours, [], 0.0, distance
+        raise BoucleIntrouvable(
+            "Le point {} n'est relie a aucune rue praticable : OpenStreetMap "
+            "ne decrit pas de passage entre l'endroit pose et le reste du "
+            "reseau{}".format(quoi,
+                ". Poser le point sur une rue ou un chemin."
+                if secours is None else
+                ". La voie reliee au reste la plus proche est a {:.0f} m — "
+                "deplacer le marqueur jusque-la.".format(distance)))
 
     depart, amorce, longueur_amorce, ecart_depart = accroche(
-        depart_brut, ecart_depart, (lat, lon), "du depart")
+        depart_brut, ecart_depart, (lat, lon), "de depart")
 
     # L'arrivee, quand elle differe, recoit le meme traitement.
     noeud_arrivee, amorce_arrivee, longueur_amorce_arrivee = depart, [], 0.0
     if arrivee is not None:
         noeud_arrivee, amorce_arrivee, longueur_amorce_arrivee, ecart_arrivee = \
-            accroche(arrivee_brut, ecart_arrivee, arrivee, "de l'arrivee")
+            accroche(arrivee_brut, ecart_arrivee, arrivee, "d'arrivee")
         journal("  arrivee accrochee a {:.0f} m du point demande"
                 .format(ecart_arrivee))
 
