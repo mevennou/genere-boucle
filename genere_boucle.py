@@ -897,7 +897,8 @@ def longueur_trajet(trajet, aretes):
 PART_LACET = 0.25
 
 
-def efface_boucles(trajet, aretes, coords, depart, ferme, cible_m, seuil=25.0):
+def efface_boucles(trajet, aretes, coords, depart, ferme, cible_m,
+                   ecart_max=80.0, rapport_min=4.0):
     """Efface les boucles du parcours : effacement de lacets sur la marche.
 
     Un parcours qui repasse par un noeud deja visite contient, entre les deux
@@ -919,7 +920,7 @@ def efface_boucles(trajet, aretes, coords, depart, ferme, cible_m, seuil=25.0):
     cumul = [0.0]
     position = {depart: 0}
     atteints = {0: depart}
-    case = max(10.0, seuil)
+    case = max(10.0, ecart_max)
     cases = {}
 
     def case_de(noeud):
@@ -957,7 +958,7 @@ def efface_boucles(trajet, aretes, coords, depart, ferme, cible_m, seuil=25.0):
             if ferme and rang == 0:
                 return False
             parcouru = cumul[-1] - cumul[rang]
-            return 60.0 <= parcouru <= lacet_max
+            return 80.0 <= parcouru <= lacet_max
 
         # Retour exact sur un noeud deja visite : la boucle est sans ambiguite.
         if vers in position:
@@ -978,7 +979,11 @@ def efface_boucles(trajet, aretes, coords, depart, ferme, cible_m, seuil=25.0):
                     if rang <= candidat or not lacet(rang):
                         continue
                     alat, alon = coords[atteints[rang]]
-                    if distance_haversine(vlat, vlon, alat, alon) > seuil:
+                    # Meme critere que la mesure : un rapport, pas une
+                    # distance seule.
+                    ecart = distance_haversine(vlat, vlon, alat, alon)
+                    parcouru = cumul[-1] - cumul[rang]
+                    if ecart >= ecart_max or parcouru < ecart * rapport_min:
                         continue
                     candidat = rang
         if candidat >= 0:
@@ -1392,7 +1397,8 @@ def mesure_doublement(points, seuil=15.0, ecart_chemin=80.0):
             "portions": retenues}
 
 
-def mesure_bouclettes(points, seuil=25.0, minimum=60.0, part_max=0.25):
+def mesure_bouclettes(points, ecart_max=80.0, rapport_min=4.0, minimum=80.0,
+                      part_max=0.25):
     """Petites boucles refermees sur elles-memes a l'interieur du parcours.
 
     Un crochet qui part d'un carrefour, fait le tour d'un pate de maisons et
@@ -1401,9 +1407,18 @@ def mesure_bouclettes(points, seuil=25.0, minimum=60.0, part_max=0.25):
     voient. C'est pourtant exactement ce qu'on ne veut pas, un circuit plus
     trois lacets pour faire la distance.
 
-    Une bouclette est un retour du trace a moins de `seuil` metres d'un point
-    deja visite, apres avoir parcouru entre `minimum` metres et une part
-    `part_max` du parcours. La borne haute ecarte la fermeture de la boucle
+    Une bouclette se reconnait a un rapport, pas a une distance : beaucoup de
+    chemin parcouru pour revenir tout pres de soi. Un virage un peu ferme rend
+    quarante metres de parcours pour trente metres a vol d'oiseau — rapport
+    1,3, ce n'est rien. Un crochet autour d'une cour rend trois cents metres
+    pour quarante — rapport 7,5, et cela se voit a l'ecran.
+
+    Un seuil de distance seul ne sait pas faire cette difference : serre, il
+    laisse passer les crochets qui se referment a trente metres ; large, il
+    prend les virages pour des boucles. Le rapport les separe, et permet donc
+    de regarder jusqu'a `ecart_max` metres.
+
+    La borne haute sur la longueur ecarte la fermeture de la boucle
     principale, qui est le but recherche et non un defaut.
     """
     n = len(points)
@@ -1415,9 +1430,9 @@ def mesure_bouclettes(points, seuil=25.0, minimum=60.0, part_max=0.25):
     if maximum <= minimum:
         return {"nombre": 0, "longueur": 0.0, "boucles": []}
 
-    # Grille spatiale sur les points, au pas du seuil : deux points voisins
-    # dans le plan tombent dans la meme case ou dans une case adjacente.
-    case = max(10.0, seuil)
+    # Grille spatiale sur les points : deux points voisins dans le plan
+    # tombent dans la meme case ou dans une case adjacente.
+    case = max(10.0, ecart_max)
 
     def case_de(k):
         return (math.floor(points[k][0] * 111320 / case),
@@ -1442,8 +1457,9 @@ def mesure_bouclettes(points, seuil=25.0, minimum=60.0, part_max=0.25):
                     parcouru = cumul[j] - cumul[i]
                     if parcouru < minimum or parcouru > maximum:
                         continue
-                    if distance_haversine(points[i][0], points[i][1],
-                                          points[j][0], points[j][1]) > seuil:
+                    ecart = distance_haversine(points[i][0], points[i][1],
+                                               points[j][0], points[j][1])
+                    if ecart >= ecart_max or parcouru < ecart * rapport_min:
                         continue
                     fin = j
         if fin > i:

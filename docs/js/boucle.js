@@ -115,7 +115,7 @@ export function construitBoucle(routeur, aretes, indexSpatial, depart, lat, lon,
 export const PART_LACET = 0.25;
 
 export function effaceBoucles(trajet, aretes, lat, lon, depart, ferme, cibleM,
-                              seuil = 25) {
+                              ecartMax = 80, rapportMin = 4) {
   const lacetMax = cibleM * PART_LACET;
   const pile = [];
   const cumul = [0];                       // longueur parcourue a chaque etape
@@ -123,7 +123,7 @@ export function effaceBoucles(trajet, aretes, lat, lon, depart, ferme, cibleM,
   // Grille spatiale sur les points deja atteints : une boucle peut se
   // refermer a quelques metres sans repasser par le meme noeud, quand l'aller
   // et le retour empruntent deux voies voisines.
-  const CASE = Math.max(10, seuil);
+  const CASE = Math.max(10, ecartMax);
   const cases = new Map();
   const clef = (i, j) => i * 1000003 + j;
   const caseDe = (n) => [
@@ -166,7 +166,7 @@ export function effaceBoucles(trajet, aretes, lat, lon, depart, ferme, cibleM,
       // precede, sans quoi il ne resterait rien.
       if (ferme && rang === 0) return false;
       const parcouru = cumul[cumul.length - 1] - cumul[rang];
-      return parcouru >= 60 && parcouru <= lacetMax;
+      return parcouru >= 80 && parcouru <= lacetMax;
     };
 
     // Retour exact sur un noeud deja visite : la boucle est sans ambiguite.
@@ -185,8 +185,11 @@ export function effaceBoucles(trajet, aretes, lat, lon, depart, ferme, cibleM,
       for (let dj = -1; dj <= 1; dj++) {
         for (const rang of (cases.get(clef(ci + di, cj + dj)) || [])) {
           if (rang <= candidat || !lacet(rang)) continue;
-          if (distanceHaversine(lat[vers], lon[vers],
-                                lat[atteints[rang]], lon[atteints[rang]]) > seuil) continue;
+          // Meme critere que la mesure : un rapport, pas une distance seule.
+          const ecart = distanceHaversine(lat[vers], lon[vers],
+                                          lat[atteints[rang]], lon[atteints[rang]]);
+          const parcouru = cumul[cumul.length - 1] - cumul[rang];
+          if (ecart >= ecartMax || parcouru < ecart * rapportMin) continue;
           candidat = rang;
         }
       }

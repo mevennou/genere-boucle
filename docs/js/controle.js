@@ -126,16 +126,25 @@ export function mesureDoublement(points, { seuil = 15, ecartChemin = 80 } = {}) 
  * rien. C'est pourtant exactement ce qu'on ne veut pas : un circuit, pas un
  * circuit plus trois lacets pour faire la distance.
  *
- * Une bouclette est un retour du trace a moins de `seuil` metres d'un point
- * deja visite, apres avoir parcouru entre `minimum` metres et une part
- * `partMax` du parcours. La borne haute ecarte la fermeture de la boucle
- * principale, qui est le but recherche et non un defaut.
+ * Une bouclette se reconnait a un rapport, pas a une distance : beaucoup de
+ * chemin parcouru pour revenir tout pres de soi. Un virage un peu ferme rend
+ * quarante metres de parcours pour trente metres a vol d'oiseau — rapport
+ * 1,3, ce n'est rien. Un crochet autour d'une cour rend trois cents metres
+ * pour quarante — rapport 7,5, et cela se voit a l'ecran.
+ *
+ * Un seuil de distance seul ne sait pas faire cette difference : serre, il
+ * laisse passer les crochets qui se referment a trente metres ; large, il
+ * prend les virages pour des boucles. Le rapport les separe, et permet donc
+ * de regarder jusqu'a `ecartMax` metres.
+ *
+ * La borne haute sur la longueur ecarte la fermeture de la boucle principale,
+ * qui est le but recherche et non un defaut.
  *
  * Renvoie { nombre, longueur, boucles }, ou `longueur` est le perimetre
  * cumule des bouclettes trouvees.
  */
-export function mesureBouclettes(points, { seuil = 25, minimum = 60,
-                                           partMax = 0.25 } = {}) {
+export function mesureBouclettes(points, { ecartMax = 80, rapportMin = 4,
+                                           minimum = 80, partMax = 0.25 } = {}) {
   const n = points.length;
   if (n < 4) return { nombre: 0, longueur: 0, boucles: [] };
 
@@ -148,9 +157,9 @@ export function mesureBouclettes(points, { seuil = 25, minimum = 60,
   const maximum = total * partMax;
   if (maximum <= minimum) return { nombre: 0, longueur: 0, boucles: [] };
 
-  // Grille spatiale sur les points, au pas du seuil : deux points voisins
-  // dans le plan se retrouvent dans la meme case ou dans une case adjacente.
-  const CASE = Math.max(10, seuil);
+  // Grille spatiale sur les points : deux points voisins dans le plan se
+  // retrouvent dans la meme case ou dans une case adjacente.
+  const CASE = Math.max(10, ecartMax);
   const cases = new Map();
   const clef = (i, j) => i * 1000003 + j;
   const caseDe = (k) => [
@@ -178,8 +187,9 @@ export function mesureBouclettes(points, { seuil = 25, minimum = 60,
           if (j <= i || j <= fin) continue;
           const parcouru = cumul[j] - cumul[i];
           if (parcouru < minimum || parcouru > maximum) continue;
-          if (distanceHaversine(points[i][0], points[i][1],
-                                points[j][0], points[j][1]) > seuil) continue;
+          const ecart = distanceHaversine(points[i][0], points[i][1],
+                                          points[j][0], points[j][1]);
+          if (ecart >= ecartMax || parcouru < ecart * rapportMin) continue;
           fin = j;
         }
       }
