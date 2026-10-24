@@ -95,21 +95,6 @@ Les fixtures sont produites en exécutant le vrai code Python, pas une réimplé
 
 Le reste de la batterie couvre la contraction du graphe, la réduction 2-cœur, l'A\* et sa pénalité, la validité du GPX produit, le chargement réel de l'interface, et la conformité du site (aucun CDN, aucun traceur, attribution présente, avertissement affiché avec le résultat).
 
-## Statistiques d'usage
-
-Le site compte trois événements : ouverture de la page, génération réussie,
-génération en échec. Il transmet le nom de l'événement, une tranche de distance
-parmi six et le niveau d'exigence — jamais le point de départ, le tracé,
-l'adresse recherchée ni le moindre identifiant. Le compteur n'enregistre que
-des agrégats journaliers, sans adresse IP ni ligne par visiteur, ce qui permet
-de se passer de bandeau de consentement. Global Privacy Control, Do Not Track
-et le lien « Ne pas être compté » sont respectés.
-
-La mesure est **désactivée par défaut** : sans adresse renseignée dans la balise
-`point-de-mesure` de `docs/index.html`, le site n'émet aucun appel. Pour
-déployer son propre compteur, voir `compteur/README.md`. La version Python ne
-comporte aucun comptage.
-
 ## Vie privée
 
 Aucun point de départ n'est écrit dans le code. Le site ne collecte rien, ne dépose aucun cookie et n'embarque aucune mesure d'audience ; il retient seulement vos réglages dans le stockage local de votre navigateur, effaçables d'un bouton. Voir les [mentions légales](https://mevennou.github.io/genere-boucle/mentions-legales.html) et la revue de conformité `AUDIT-LEGAL.md`.
