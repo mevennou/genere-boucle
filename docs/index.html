@@ -384,15 +384,16 @@
     <input id="curseur" type="range" min="1" max="80" step="0.5" value="7"
            aria-label="Distance en kilomètres">
   </div>
-  <p class="aide">Une tolérance de 3 % est admise : entre deux boucles, celle qui
-     ne se répète pas l'emporte sur celle qui tombe pile. Un tracé net est
-     préféré à la distance exacte, dans la limite d'un cinquième.</p>
+  <p class="aide">Jamais plus de 0,5 % de moins que demandé, au plus 5 % de
+     plus : mieux vaut 500 m de trop que 50 de moins. Si aucune boucle ne peut
+     vraiment tenir la distance, un parcours plus court est proposé, à faire
+     plusieurs fois.</p>
 
   <label for="niveau">Exigence de praticabilité</label>
   <select id="niveau">
     <option value="strict">Stricte — bitume et stabilisé uniquement</option>
     <option value="normal" selected>Normale — chemins entretenus et documentés</option>
-    <option value="tolerant">Tolérante — accepte les sentiers non documentés</option>
+    <option value="tolerant">Tolérante — sentiers non documentés, routes sans trottoir</option>
   </select>
 
   <button id="btn-generer">Générer le parcours</button>

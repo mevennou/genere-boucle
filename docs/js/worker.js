@@ -26,7 +26,12 @@ self.onmessage = async (evenement) => {
       journal, source: sourceOverpass(),
     });
 
-    const nom = nomTrace(p.km, !p.arrivee);
+    // Quand le parcours est a refaire plusieurs fois, le nom le dit : c'est
+    // lui qu'on lit sur la montre.
+    const tours = resultat.tours || 1;
+    const nom = tours > 1
+      ? nomTrace(resultat.distance / tours / 1000, true, new Date(), tours)
+      : nomTrace(p.km, !p.arrivee);
     self.postMessage({
       type: "fini",
       resultat: {
@@ -38,6 +43,9 @@ self.onmessage = async (evenement) => {
         deplaceDepart: resultat.deplaceDepart,
         deplaceArrivee: resultat.deplaceArrivee,
         longueurBoucle: resultat.longueurBoucle,
+        // Plus d'un tour quand aucune boucle unique ne tenait la distance : le
+        // GPX n'en contient qu'un, l'interface doit dire combien en faire.
+        tours: tours,
         // L'interface annonce les portions longees : sans cette mesure, elle
         // les passait sous silence.
         doublement: resultat.doublement,

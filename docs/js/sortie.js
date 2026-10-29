@@ -71,8 +71,10 @@ export function nomHorodate(km, date = new Date()) {
   return `${d}_${km.toFixed(1)}km.gpx`;
 }
 
-export function nomTrace(km, boucle = true, date = new Date()) {
+/** `tours` > 1 : le fichier ne contient qu'un tour, `km` est sa longueur. */
+export function nomTrace(km, boucle = true, date = new Date(), tours = 1) {
   const d = `${deuxChiffres(date.getDate())}/${deuxChiffres(date.getMonth() + 1)}/`
           + date.getFullYear();
-  return `${boucle ? "Boucle" : "Parcours"} ${km.toFixed(1)} km du ${d}`;
+  const fois = tours > 1 ? ` x${tours}` : "";
+  return `${boucle ? "Boucle" : "Parcours"} ${km.toFixed(1)} km${fois} du ${d}`;
 }

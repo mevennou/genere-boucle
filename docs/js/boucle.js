@@ -49,14 +49,38 @@ export function viragesSerres(trajet, aretes, lat, lon, longueur) {
   return compte / (longueur / 1000.0);
 }
 
+// Un metre de moins pese comme dix de trop. Le coureur l'a dit ainsi : il
+// prefere cinq cents metres de plus a cinquante de moins. Une boucle un peu
+// longue se court sans y penser ; une boucle trop courte se rattrape en
+// tournant autour du pate de maisons a l'arrivee.
+//
+// La regle vaut pour les petits ecarts, ceux qu'elle compare. Etendue sans
+// fin, elle preferait neuf kilometres sept a quatre et demi pour cinq
+// demandes : au-dela du premier demi-pour-cent, le manque ne compte plus
+// que trois fois.
+export const POIDS_MANQUE = 10;
+export const MANQUE_TOLERE = 0.005;
+export const POIDS_MANQUE_AU_DELA = 3;
+
+/** Ecart a la distance visee, en part de celle-ci, le manque pesant plus lourd. */
+export function ecartDistance(longueur, cibleM) {
+  const ecart = (longueur - cibleM) / cibleM;
+  if (ecart >= 0) return ecart;
+  const manque = -ecart;
+  return POIDS_MANQUE * Math.min(manque, MANQUE_TOLERE)
+       + POIDS_MANQUE_AU_DELA * Math.max(0, manque - MANQUE_TOLERE);
+}
+
 /**
  * Classement des boucles candidates, du meilleur au moins bon. Criteres
  * successifs, par tranches d'un demi-pour-cent pour ne pas departager sur du
  * bruit : d'abord la boucle qui se repete le moins, puis celle qui colle a la
- * distance, et a egalite celle qui zigzague le moins.
+ * distance, et a egalite celle qui zigzague le moins. La tolerance se lit sur
+ * l'ecart pondere : 5 % admet un demi-kilometre de plus sur dix, mais pas
+ * plus de cinquante metres de moins.
  */
 export function noteBoucle(longueur, repetee, cibleM, tolerance, virages = 0.0) {
-  const erreur = Math.abs(longueur - cibleM) / cibleM;
+  const erreur = ecartDistance(longueur, cibleM);
   const part = longueur ? repetee / longueur : 1.0;
   if (erreur <= tolerance) {
     return [0, arrondiPython(part * 200), arrondiPython(erreur * 200), virages];
@@ -74,13 +98,31 @@ export function compareNote(a, b) {
   return 0;
 }
 
-/** Boucle passant par `sommets` ancres reparties en couronne autour du depart. */
+/**
+ * Boucle passant par les sommets d'un polygone regulier de `sommets` cotes.
+ *
+ * Deux facons de le poser. Centre sur le depart, il l'entoure : la boucle
+ * part vers une ancre, fait le tour et revient au centre — deux rayons qui,
+ * quand le reseau ne laisse qu'un couloir pour quitter le depart, se longent
+ * et dessinent un huit. Excentre, le depart est l'un de ses sommets et le
+ * cercle s'ouvre dans la direction du cap : la boucle part d'un cote et
+ * revient par l'autre, sans repasser par le milieu. Les deux formes sont
+ * essayees, chacune reussit la ou l'autre echoue : au bord de la mer, un
+ * polygone centre a la moitie de ses ancres dans l'eau.
+ */
 export function construitBoucle(routeur, aretes, indexSpatial, depart, lat, lon,
-                                rayon, cap, sommets, cibleM) {
+                                rayon, cap, sommets, cibleM, excentre = false) {
+  let centreLat = lat, centreLon = lon, debut = cap, premier = 0;
+  if (excentre) {
+    [centreLat, centreLon] = pointADistance(lat, lon, cap, rayon);
+    // Vu du centre, le depart est a l'oppose du cap : c'est le sommet zero.
+    debut = cap + 180.0;
+    premier = 1;
+  }
   const ancres = [];
-  for (let i = 0; i < sommets; i++) {
-    const angle = moduloPositif(cap + i * 360.0 / sommets, 360);
-    const [cibleLat, cibleLon] = pointADistance(lat, lon, angle, rayon);
+  for (let i = premier; i < sommets; i++) {
+    const angle = moduloPositif(debut + i * 360.0 / sommets, 360);
+    const [cibleLat, cibleLon] = pointADistance(centreLat, centreLon, angle, rayon);
     const [noeud] = indexSpatial.plusProche(cibleLat, cibleLon,
                                             Math.max(400.0, rayon * 0.45));
     if (noeud === null || noeud === depart || ancres.includes(noeud)) continue;
@@ -115,7 +157,7 @@ export function construitBoucle(routeur, aretes, indexSpatial, depart, lat, lon,
 export const PART_LACET = 0.25;
 
 export function effaceBoucles(trajet, aretes, lat, lon, depart, ferme, cibleM,
-                              ecartMax = 80, rapportMin = 4) {
+                              ecartMax = 80, rapportMin = 4, relie = null) {
   const lacetMax = cibleM * PART_LACET;
   const pile = [];
   const cumul = [0];                       // longueur parcourue a chaque etape
@@ -178,7 +220,11 @@ export function effaceBoucles(trajet, aretes, lat, lon, depart, ferme, cibleM,
     }
 
     // Sinon, retour a quelques metres d'un point deja atteint : l'aller et le
-    // retour ont emprunte deux voies voisines sans partager de noeud.
+    // retour ont emprunte deux voies voisines sans partager de noeud. Couper
+    // la boucle laisse alors un trou entre ces deux points, qu'il faut combler
+    // par un vrai chemin : sans raccord, le trace sautait en ligne droite a
+    // travers ce qui les separe — un pre, un mur, une riviere.
+    if (!relie) { enregistre(vers, pile.length); continue; }
     const [ci, cj] = caseDe(vers);
     let candidat = -1;
     for (let di = -1; di <= 1; di++) {
@@ -194,7 +240,24 @@ export function effaceBoucles(trajet, aretes, lat, lon, depart, ferme, cibleM,
         }
       }
     }
-    if (candidat >= 0) { oublie(candidat); continue; }
+    if (candidat >= 0) {
+      // Le raccord obeit au meme rapport que la boucle qu'il remplace : un
+      // raccord long ne supprime pas un crochet, il en dessine un autre.
+      const parcouru = cumul[cumul.length - 1] - cumul[candidat];
+      const raccord = relie(atteints[candidat], vers);
+      let longueur = Infinity;
+      if (raccord) longueur = raccord.reduce((s, [i]) => s + aretes[i].longueur, 0);
+      if (longueur <= 2 * ecartMax && longueur * rapportMin <= parcouru) {
+        oublie(candidat);
+        for (const pas of raccord) {
+          const a = aretes[pas[0]];
+          pile.push(pas);
+          cumul.push(cumul[cumul.length - 1] + a.longueur);
+          enregistre(pas[1] === a.u ? a.v : a.u, pile.length);
+        }
+        continue;
+      }
+    }
 
     enregistre(vers, pile.length);
   }
@@ -221,8 +284,13 @@ function assemble(routeur, etapes, cibleM) {
   }
 
   const ferme = etapes[0] === etapes[etapes.length - 1];
+  const relie = (a, b) => {
+    const resultat = routeur.plusCourtChemin(a, b);
+    return resultat === null ? null : resultat[1];
+  };
   const trajetTotal = effaceBoucles(trajetBrut, routeur.aretes, routeur.lat,
-                                    routeur.lon, etapes[0], ferme, cibleM);
+                                    routeur.lon, etapes[0], ferme, cibleM,
+                                    80, 4, relie);
   if (!trajetTotal.length) return null;
 
   // Les comptes se refont sur le trajet net : ce qui a ete efface n'a pas ete
@@ -257,26 +325,31 @@ function assemble(routeur, etapes, cibleM) {
  */
 export function chercheBoucle(routeur, aretes, lat, lon, indexSpatial, depart,
                               latD, lonD, cibleM, cap, sommets, iterations,
-                              tolerance, variantes = null) {
+                              tolerance, variantes = null, excentre = false) {
   const rayonIdeal = cibleM / (2 * sommets * Math.sin(Math.PI / sommets));
   let bas = rayonIdeal * 0.25, haut = rayonIdeal * 1.60;
   let meilleur = null;
+  // La dichotomie vise le milieu de la fenetre admise, pas son bord : viser
+  // la cible pile, c'etait rendre une fois sur deux une boucle trop courte.
+  const vise = cibleM * (1 + tolerance / 2);
 
   for (let i = 0; i < iterations; i++) {
     const rayon = (bas + haut) / 2.0;
     const essai = construitBoucle(routeur, aretes, indexSpatial, depart,
-                                  latD, lonD, rayon, cap, sommets, cibleM);
+                                  latD, lonD, rayon, cap, sommets, cibleM,
+                                  excentre);
     if (essai === null) { haut = rayon; continue; }
     const [longueur, repetee, trajet] = essai;
     const note = noteBoucle(longueur, repetee, cibleM, tolerance,
                             viragesSerres(trajet, aretes, lat, lon, longueur));
-    const essaiNote = [note, longueur, repetee, trajet, sommets, cap, rayon];
+    const essaiNote = [note, longueur, repetee, trajet, sommets, cap, rayon,
+                       excentre];
     // Toutes les tentatives valides sont conservees, pas seulement la
     // meilleure : le controle geometrique final a besoin de matiere pour
     // trouver un trace sans defaut, et la dichotomie en produit dix par forme.
     if (variantes) variantes.push(essaiNote);
     if (meilleur === null || compareNote(note, meilleur[0]) < 0) meilleur = essaiNote;
-    if (longueur < cibleM) bas = rayon; else haut = rayon;
+    if (longueur < vise) bas = rayon; else haut = rayon;
   }
   return meilleur;
 }
@@ -286,20 +359,21 @@ export function affineBoucle(routeur, aretes, lat, lon, indexSpatial, depart,
                              latD, lonD, cibleM, tolerance, repetitionMax,
                              meilleur, variantes = null) {
   const sommets = meilleur[4], cap = meilleur[5], rayon = meilleur[6];
+  const excentre = meilleur[7];
   for (const decalage of [-9.0, -6.0, -3.0, 3.0, 6.0, 9.0, 0.0]) {
     for (const facteur of [0.88, 0.92, 0.96, 1.0, 1.04, 1.08, 1.12]) {
       if (decalage === 0.0 && facteur === 1.0) continue;
       const nouveauCap = moduloPositif(cap + decalage, 360);
       const essai = construitBoucle(routeur, aretes, indexSpatial, depart,
                                     latD, lonD, rayon * facteur, nouveauCap,
-                                    sommets, cibleM);
+                                    sommets, cibleM, excentre);
       if (essai === null) continue;
       const [longueur, repetee, trajet] = essai;
       if (longueur && repetee / longueur > repetitionMax) continue;
       const note = noteBoucle(longueur, repetee, cibleM, tolerance,
                               viragesSerres(trajet, aretes, lat, lon, longueur));
       const essaiNote = [note, longueur, repetee, trajet, sommets, nouveauCap,
-                         rayon * facteur];
+                         rayon * facteur, excentre];
       if (variantes) variantes.push(essaiNote);
       if (compareNote(note, meilleur[0]) < 0) meilleur = essaiNote;
     }
@@ -344,6 +418,7 @@ export function chercheTrajet(routeur, aretes, lat, lon, indexSpatial, depart, a
   const reste = Math.max(0.0, Math.pow(cibleM / 2.0, 2) - Math.pow(corde / 2.0, 2));
   let bas = 0.0, haut = Math.sqrt(reste) * 1.7 + 300.0;
   let meilleur = null;
+  const vise = cibleM * (1 + tolerance / 2);
 
   for (let i = 0; i < iterations; i++) {
     const hauteur = (bas + haut) / 2.0;
@@ -357,7 +432,7 @@ export function chercheTrajet(routeur, aretes, lat, lon, indexSpatial, depart, a
     const essaiNote = [note, longueur, repetee, trajet, nombre, cote, hauteur];
     if (variantes) variantes.push(essaiNote);
     if (meilleur === null || compareNote(note, meilleur[0]) < 0) meilleur = essaiNote;
-    if (longueur < cibleM) bas = hauteur; else haut = hauteur;
+    if (longueur < vise) bas = hauteur; else haut = hauteur;
   }
   return meilleur;
 }

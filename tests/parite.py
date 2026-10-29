@@ -10,6 +10,7 @@ Usage : python3 tests/parite.py ../genere_boucle.py tests/fixtures
 import importlib.util
 import itertools
 import json
+import math
 import os
 import random
 import sys
@@ -65,9 +66,18 @@ def cas_de_tags():
         ("sidewalk", "no"), ("sidewalk", "none"), ("sidewalk", "both"),
         ("maxspeed", "30"), ("maxspeed", "70"), ("maxspeed", "90"),
         ("maxspeed", "50 mph"), ("maxspeed", "walk"),
+        # Limites implicites et trottoirs par cote : ce qui decide si une
+        # route est trop dangereuse pour y courir.
+        ("maxspeed", "80"), ("maxspeed", "none"), ("maxspeed", "FR:rural"),
+        ("maxspeed", "FR:urban"), ("maxspeed:type", "FR:zone30"),
+        ("zone:maxspeed", "FR:30"), ("source:maxspeed", "FR:rural"),
+        ("source:maxspeed", "sign"), ("sidewalk", "separate"),
+        ("sidewalk:both", "separate"), ("sidewalk:left", "yes"),
+        ("sidewalk:right", "no"), ("foot", "official"),
     ]
     for hw in ("footway", "path", "track", "residential", "service",
-               "secondary", "tertiary", "bridleway", "steps"):
+               "secondary", "tertiary", "unclassified", "road", "bridleway",
+               "steps"):
         for cle, valeur in bloquants:
             cas.append({"highway": hw, cle: valeur})
 
@@ -86,7 +96,8 @@ def cas_de_tags():
     for _ in range(1200):
         tags = {"highway": alea.choice(["footway", "path", "track", "residential",
                                         "service", "secondary", "tertiary",
-                                        "cycleway", "pedestrian", "steps"])}
+                                        "unclassified", "cycleway", "pedestrian",
+                                        "steps"])}
         for cle, valeur in alea.sample(cles, alea.randint(1, 3)):
             tags[cle] = valeur
         cas.append(tags)
@@ -297,6 +308,57 @@ def dump_controle():
     return cas
 
 
+def reseau_anneau():
+    """Un anneau de 2,55 km et ses impasses : la seule boucle possible.
+
+    C'est le cas ou une boucle unique ne peut vraiment pas tenir une distance
+    plus longue, et ou il faut proposer de refaire l'anneau plusieurs fois.
+    """
+    voies = []
+    identifiant = itertools.count(9000)
+    noeud = itertools.count(900000)
+    centre_lat, centre_lon, cotes = 47.5, 5.5, 48
+    rayon = 2550.0 / (2 * cotes * math.sin(math.pi / cotes))
+    points = []
+    for k in range(cotes):
+        lat, lon = ORIGINE.point_a_distance(centre_lat, centre_lon,
+                                            k * 360.0 / cotes, rayon)
+        points.append((next(noeud), round(lat, 7), round(lon, 7)))
+
+    def ajoute(chaine, tags):
+        voies.append({
+            "type": "way", "id": next(identifiant), "tags": tags,
+            "nodes": [p[0] for p in chaine],
+            "geometry": [{"lat": p[1], "lon": p[2]} for p in chaine],
+        })
+
+    ajoute(points + [points[0]], {"highway": "footway", "surface": "asphalt"})
+    # Les impasses creent les carrefours de l'anneau, puis disparaissent au
+    # 2-coeur.
+    for k in range(0, cotes, 2):
+        lat, lon = ORIGINE.point_a_distance(points[k][1], points[k][2],
+                                            k * 360.0 / cotes, 60.0)
+        ajoute([points[k], (next(noeud), round(lat, 7), round(lon, 7))],
+               {"highway": "service", "surface": "asphalt"})
+    return voies, (points[0][1], points[0][2])
+
+
+def dump_tours():
+    """Fait tourner genere() sur l'anneau : un, deux, trois tours."""
+    voies, depart = reseau_anneau()
+    ORIGINE.telecharge_reseau = lambda *a, **k: voies
+    ORIGINE.telecharge_itineraires = lambda *a, **k: set()
+    ORIGINE.telecharge_barrieres = lambda *a, **k: []
+    cas = []
+    for km in (2.5, 5.0, 7.5):
+        r = ORIGINE.genere(depart[0], depart[1], km * 1000.0,
+                           journal=lambda *a: None)
+        cas.append({"km": km, "distance": r["distance"], "tours": r["tours"],
+                    "longueur_boucle": r["longueur_boucle"],
+                    "nb_points": len(r["points"])})
+    return {"voies": voies, "depart": list(depart), "cas": cas}
+
+
 def dump_bout_en_bout(voies):
     """Fait tourner genere() sur le reseau fabrique, sans toucher au reseau."""
     ORIGINE.telecharge_reseau = lambda *a, **k: voies
@@ -342,6 +404,7 @@ if __name__ == "__main__":
         "reseau.json": {"voies": voies, "noeuds_interdits": interdites},
         "controle.json": dump_controle(),
         "bout_en_bout.json": dump_bout_en_bout(voies),
+        "anneau.json": dump_tours(),
     }
     for nom, contenu in fichiers.items():
         with open(os.path.join(dossier, nom), "w", encoding="utf-8") as f:

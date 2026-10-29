@@ -141,6 +141,55 @@ test("praticabilite : les refus qui comptent vraiment", () => {
   assert.notEqual(evalueVoie({ highway: "path", surface: "asphalt" }, "strict"), null);
 });
 
+test("praticabilite : pas de route de campagne sans trottoir", () => {
+  // Le defaut signale : le site faisait courir sur des routes a 80 km/h sans
+  // trottoir, parce qu'une route y coutait moins cher qu'un sentier nomme.
+  const campagne = [
+    { highway: "unclassified", maxspeed: "80" },
+    { highway: "tertiary", maxspeed: "70" },
+    { highway: "secondary", maxspeed: "90", sidewalk: "no" },
+    // Limite implicite, sans chiffre : c'est ainsi qu'est notee une bonne
+    // part des routes francaises.
+    { highway: "unclassified", maxspeed: "FR:rural" },
+    { highway: "tertiary", "source:maxspeed": "FR:rural" },
+    { highway: "road", maxspeed: "50 mph" },
+  ];
+  for (const tags of campagne) {
+    for (const niveau of ["strict", "normal"]) {
+      assert.equal(evalueVoie(tags, niveau), null, `${JSON.stringify(tags)} ${niveau}`);
+    }
+    // Le niveau tolerant la garde, mais bien plus chere qu'une rue.
+    const verdict = evalueVoie(tags, "tolerant");
+    assert.notEqual(verdict, null, JSON.stringify(tags));
+    assert.ok(verdict[0] > 3 * evalueVoie({ highway: "residential" }, "tolerant")[0],
+      `${JSON.stringify(tags)} trop peu rencherie : ${verdict[0]}`);
+  }
+
+  // Un trottoir, d'un cote ou cartographie a part, rend la route praticable.
+  const bordees = [
+    { highway: "unclassified", maxspeed: "80", sidewalk: "left" },
+    { highway: "tertiary", maxspeed: "80", "sidewalk:both": "separate" },
+    { highway: "tertiary", maxspeed: "80", "sidewalk:right": "yes" },
+    { highway: "secondary", maxspeed: "80", foot: "designated" },
+  ];
+  for (const tags of bordees) {
+    assert.notEqual(evalueVoie(tags, "normal"), null, JSON.stringify(tags));
+  }
+
+  // En ville, la meme route sans trottoir reste un passage possible.
+  for (const tags of [{ highway: "tertiary", maxspeed: "50" },
+                      { highway: "unclassified", "zone:maxspeed": "FR:30" },
+                      { highway: "tertiary", "maxspeed:type": "FR:urban" }]) {
+    assert.notEqual(evalueVoie(tags, "normal"), null, JSON.stringify(tags));
+  }
+
+  // Sans limite connue, on ne suppose pas le pire : ce sont surtout des
+  // chemins entre hameaux et des rues de bourg non renseignes.
+  assert.notEqual(evalueVoie({ highway: "unclassified" }, "normal"), null);
+  // Une rue residentielle n'est jamais une route de campagne.
+  assert.notEqual(evalueVoie({ highway: "residential" }, "normal"), null);
+});
+
 test("praticabilite : les couts vont dans le bon sens", () => {
   const cout = (tags, niveau = "normal", balise = false) =>
     evalueVoie(tags, niveau, balise)[0];
@@ -152,9 +201,14 @@ test("praticabilite : les couts vont dans le bon sens", () => {
   // Une departementale sans trottoir coute plus cher.
   assert.ok(cout({ highway: "secondary", sidewalk: "no" })
           > cout({ highway: "secondary", sidewalk: "both" }));
-  // Une voie rapide limitee a 90 coute encore plus cher.
-  assert.ok(cout({ highway: "secondary", maxspeed: "90" })
-          > cout({ highway: "secondary", maxspeed: "30" }));
+  // Une voie rapide limitee a 90 coute encore plus cher, meme bordee d'un
+  // trottoir. Sans trottoir, elle n'entre pas du tout : voir plus bas.
+  assert.ok(cout({ highway: "secondary", maxspeed: "90", sidewalk: "both" })
+          > cout({ highway: "secondary", maxspeed: "30", sidewalk: "both" }));
+  // Une route dont on ignore la limite coute plus cher qu'une route bordee
+  // d'un trottoir : le premier chemin parallele doit l'emporter.
+  assert.ok(cout({ highway: "unclassified" })
+          > cout({ highway: "unclassified", sidewalk: "both" }));
   // Les qualites annoncees sont les bonnes.
   assert.equal(evalueVoie({ highway: "residential" }, "normal")[2], "voirie");
   assert.equal(evalueVoie({ highway: "footway", surface: "asphalt" }, "normal")[2], "dure");

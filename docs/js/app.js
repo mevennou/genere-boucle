@@ -355,7 +355,11 @@ function dessine(r) {
     + (r.nbBouclettes > 0
       ? `, ${r.nbBouclettes} petite${r.nbBouclettes > 1 ? "s" : ""} boucle`
         + `${r.nbBouclettes > 1 ? "s" : ""}` : "");
-  $("resume").textContent = `${(r.distance / 1000).toFixed(2)} km`
+  const tours = r.tours || 1;
+  const parTour = r.distance / tours;
+  $("resume").textContent = (tours > 1
+      ? `${(parTour / 1000).toFixed(2)} km à faire ${tours} fois`
+      : `${(r.distance / 1000).toFixed(2)} km`)
     + (r.repetee < 1 ? ", sans aller-retour" : `, ${Math.round(r.repetee)} m repassés`)
     + defauts;
   if (estMobile()) replie(true);
@@ -371,6 +375,13 @@ function dessine(r) {
   let html = `<div class="titre-bloc">${r.boucle ? "Boucle" : "Parcours"} retenu</div><table>`;
   html += `<tr><td>Distance</td><td><b>${km(r.distance)}</b> `
         + `(${r.distance - r.cible >= 0 ? "+" : ""}${Math.round(r.distance - r.cible)} m)</td></tr>`;
+  if (tours > 1) {
+    // Le recours des vraies impasses : le dire en clair, avant tout le reste.
+    html += `<tr><td>Tours</td><td><b>${tours} × ${km(parTour)}</b></td></tr>`
+          + `</table><p class="avertissement">Aucune boucle unique ne tient cette `
+          + "distance sans aller-retour ni route dangereuse. Le GPX contient un "
+          + `seul tour de ${km(parTour)} : fais-le ${tours} fois.</p><table>`;
+  }
   html += `<tr><td>Aller-retour</td><td class="${propre ? "bon" : ""}">`
         + `${propre ? "aucun" : Math.round(r.repetee) + " m"}</td></tr>`;
   html += `<tr><td>Départ à</td><td>${Math.round(r.accroche)} m du point posé</td></tr>`;
@@ -419,7 +430,8 @@ function dessine(r) {
   bilan.style.display = "block";
 
   const nomFichier = `${new Date().toISOString().slice(0, 10)}_`
-                   + `${(r.distance / 1000).toFixed(1)}km`;
+                   + (tours > 1 ? `${(parTour / 1000).toFixed(1)}km_x${tours}`
+                                : `${(r.distance / 1000).toFixed(1)}km`);
   $("btn-gpx").onclick = () =>
     telecharge(r.gpx, `${nomFichier}.gpx`, "application/gpx+xml");
   $("btn-geojson").onclick = () =>

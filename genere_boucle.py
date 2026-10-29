@@ -12,14 +12,16 @@ Principe (different d'un simple appel a un serveur de routage) :
      gue, une voie privee... n'existent tout simplement pas dans le graphe :
      il est donc IMPOSSIBLE que l'itineraire y passe. C'est une garantie
      structurelle, pas une penalite qu'une bonne distance pourrait compenser.
+     Il en va de meme des routes de campagne sans trottoir : une route a
+     70 km/h ou plus, sans espace pieton, n'entre pas dans le graphe.
   3. On supprime toutes les impasses du graphe (reduction dite "2-coeur" :
      on retire iterativement les noeuds n'ayant qu'un seul voisin). Une antenne
      sans issue etant absente, le trace ne peut plus y entrer pour en ressortir
      -> plus d'aller-retour ni de demi-tour.
-  4. On cherche la boucle par un polygone d'ancres (3, 4 ou 5 sommets) autour
-     du depart, chaque troncon calcule en A* avec une penalite forte sur les
-     aretes deja empruntees : la distance cible est atteinte en ELARGISSANT la
-     boucle, jamais en ajoutant des va-et-vient.
+  4. On cherche la boucle par un polygone d'ancres (3 a 6 sommets), centre sur
+     le depart ou passant par lui, chaque troncon calcule en A* avec une
+     penalite forte sur les aretes deja empruntees : la distance cible est
+     atteinte en ELARGISSANT la boucle, jamais en ajoutant des va-et-vient.
 
 Deux facons de s'en servir, dans ce seul fichier :
 
@@ -164,6 +166,22 @@ BARRIERES_INFRANCHISSABLES = {
     "hampshire_gate", "guard_rail",
 }
 
+# Routes ouvertes a la circulation, ou le pieton partage la chaussee avec les
+# voitures quand rien ne lui est reserve. Les rues residentielles n'en sont
+# pas : trafic de desserte, vitesse de ville.
+ROUTES_PARTAGEES = {
+    "unclassified", "tertiary", "tertiary_link", "secondary", "secondary_link",
+    "road",
+}
+
+# Valeurs qui attestent un espace pieton le long de la chaussee, qu'il soit
+# dessine sur la route elle-meme ou cartographie a part.
+COTES_PIETONS = {"yes", "both", "left", "right", "separate"}
+
+# A partir de cette vitesse, courir sur la chaussee sans trottoir n'est plus
+# un inconfort mais un danger.
+VITESSE_DANGEREUSE = 70
+
 
 def _nombre(valeur):
     """Convertit '1.5', '1,5 m', '2' en flottant ; None si impossible."""
@@ -173,6 +191,55 @@ def _nombre(valeur):
         return float(str(valeur).split()[0].replace(",", "."))
     except (ValueError, IndexError):
         return None
+
+
+def vitesse_autorisee(tags):
+    """Vitesse autorisee en km/h, ou None si les tags ne la disent pas.
+
+    La limite peut etre chiffree ("80", "50 mph") ou implicite ("FR:rural",
+    "FR:zone30") : c'est ainsi qu'est notee une bonne part des routes
+    francaises, qui n'ont pas de panneau mais une regle.
+    """
+    for cle in ("maxspeed", "maxspeed:type", "zone:maxspeed", "source:maxspeed"):
+        valeur = tags.get(cle)
+        if not valeur:
+            continue
+        nature = str(valeur).split(":")[-1].strip().lower()
+        if nature == "rural":
+            return 80.0
+        if nature == "urban":
+            return 50.0
+        if nature.startswith("zone"):
+            nature = nature[4:]
+        vitesse = _nombre(nature)
+        if vitesse is not None:
+            return vitesse * 1.609 if "mph" in str(valeur) else vitesse
+    return None
+
+
+def exposition_route(tags):
+    """Ce que risque un coureur sur une route sans trottoir ni cheminement.
+
+    "danger" quand la limite connue est celle d'une route de campagne,
+    "incertaine" quand rien ne la dit, None sinon.
+
+    Le danger se prouve, il ne se suppose pas. Une limite absente ne vaut pas
+    quatre-vingts : sur le terrain, ce sont surtout des chemins entre hameaux
+    ou des rues de bourg que personne n'a renseignes, et les tenir pour des
+    routes rapides vidait les campagnes de tout parcours. L'eclairage public,
+    lui, signe la traversee d'une agglomeration : la route est alors une rue.
+    """
+    if tags.get("highway") not in ROUTES_PARTAGEES:
+        return None
+    if tags.get("foot") == "designated":
+        return None
+    for cle in ("sidewalk", "sidewalk:both", "sidewalk:left", "sidewalk:right"):
+        if tags.get(cle) in COTES_PIETONS:
+            return None
+    vitesse = vitesse_autorisee(tags)
+    if vitesse is not None:
+        return "danger" if vitesse >= VITESSE_DANGEREUSE else None
+    return None if tags.get("lit") not in (None, "no") else "incertaine"
 
 
 def evalue_voie(tags, niveau, balise=False):
@@ -212,6 +279,14 @@ def evalue_voie(tags, niveau, balise=False):
     service = tags.get("service")
     if (service in SERVICES_PRIVES and niveau != "tolerant"
             and pied not in ("yes", "designated", "official")):
+        return None
+
+    # Une route de campagne sans trottoir n'est pas une penalite a compenser
+    # par une bonne distance : c'est un danger, elle n'entre pas dans le
+    # graphe. Seul le niveau tolerant la garde, tres rencherie, pour ne pas
+    # laisser sans reponse une campagne ou rien d'autre ne relie les chemins.
+    exposition = exposition_route(tags)
+    if exposition == "danger" and niveau != "tolerant":
         return None
 
     # --- obstacles physiques et etat du terrain ---------------------------
@@ -310,12 +385,19 @@ def evalue_voie(tags, niveau, balise=False):
     elif service == "alley":
         cout *= 1.3
 
-    if hw in ("secondary", "secondary_link", "tertiary", "tertiary_link"):
+    if hw in ROUTES_PARTAGEES:
         if tags.get("sidewalk") in ("no", "none"):
             cout *= 1.8
-        vitesse = _nombre(tags.get("maxspeed"))
-        if vitesse is not None and vitesse >= 70:
+        vitesse = vitesse_autorisee(tags)
+        if vitesse is not None and vitesse >= VITESSE_DANGEREUSE:
             cout *= 1.6
+        # Sans limite connue, la route reste un recours : assez chere pour que
+        # le moindre chemin ou trottoir parallele l'emporte, pas au point de
+        # couper les hameaux les uns des autres.
+        if exposition == "danger":
+            cout *= 3.0
+        elif exposition == "incertaine":
+            cout *= 1.5
 
     if not naturel and qualite == "inconnue":
         qualite = "voirie"                # trottoir, rue : revetement implicite
@@ -703,6 +785,14 @@ MIN_NOEUDS_COEUR = 20
 # rien a proposer.
 PORTEE_SECOURS = 1500.0
 
+# Ce qu'une amorce en impasse peut representer de la distance demandee. Une
+# boucle la court deux fois : au-dela, ce n'est plus l'acces au parcours, c'en
+# est la moitie en aller-retour. Une campagne dont on a retire les routes
+# rapides n'est plus qu'un arbre de chemins, et le premier noeud du reseau
+# maille pouvait s'y trouver a trois kilometres et demi : huit kilometres
+# demandes, trente-six rendus.
+PART_AMORCE = 0.15
+
 
 def composantes_utiles(adjacence, aretes, min_noeuds=MIN_NOEUDS_COEUR,
                        min_longueur=0.0):
@@ -898,7 +988,7 @@ PART_LACET = 0.25
 
 
 def efface_boucles(trajet, aretes, coords, depart, ferme, cible_m,
-                   ecart_max=80.0, rapport_min=4.0):
+                   ecart_max=80.0, rapport_min=4.0, relie=None):
     """Efface les boucles du parcours : effacement de lacets sur la marche.
 
     Un parcours qui repasse par un noeud deja visite contient, entre les deux
@@ -910,7 +1000,10 @@ def efface_boucles(trajet, aretes, coords, depart, ferme, cible_m,
 
     Une boucle peut aussi se refermer a quelques metres sans repasser par le
     meme noeud, quand l'aller et le retour empruntent deux voies voisines : on
-    la coupe aussi, mais seulement si elle a la taille d'un lacet.
+    la coupe aussi, mais seulement si elle a la taille d'un lacet, et si
+    `relie(a, b)` fournit un vrai chemin pour combler le trou laisse entre les
+    deux points. Sans raccord, le trace sautait en ligne droite a travers ce
+    qui les separe — un pre, un mur, une riviere.
 
     La fermeture d'une boucle est le but recherche, pas un lacet : le dernier
     retour au depart est donc epargne.
@@ -970,6 +1063,9 @@ def efface_boucles(trajet, aretes, coords, depart, ferme, cible_m,
 
         # Sinon, retour a quelques metres d'un point deja atteint : l'aller et
         # le retour ont emprunte deux voies voisines sans partager de noeud.
+        if relie is None:
+            enregistre(vers, len(pile))
+            continue
         ci, cj = case_de(vers)
         candidat = -1
         vlat, vlon = coords[vers]
@@ -987,8 +1083,22 @@ def efface_boucles(trajet, aretes, coords, depart, ferme, cible_m,
                         continue
                     candidat = rang
         if candidat >= 0:
-            oublie(candidat)
-            continue
+            # Le raccord obeit au meme rapport que la boucle qu'il remplace :
+            # un raccord long ne supprime pas un crochet, il en dessine un
+            # autre.
+            parcouru = cumul[-1] - cumul[candidat]
+            raccord = relie(atteints[candidat], vers)
+            longueur = float("inf")
+            if raccord is not None:
+                longueur = sum(aretes[i][2] for i, _ in raccord)
+            if longueur <= 2 * ecart_max and longueur * rapport_min <= parcouru:
+                oublie(candidat)
+                for pas in raccord:
+                    a = aretes[pas[0]]
+                    pile.append(pas)
+                    cumul.append(cumul[-1] + a[2])
+                    enregistre(a[1] if pas[1] == a[0] else a[0], len(pile))
+                continue
 
         enregistre(vers, len(pile))
     return pile
@@ -1018,8 +1128,14 @@ def _assemble(adjacence, aretes, coords, etapes, couloirs, cible_m):
         trajet_brut.extend(trajet)
 
     ferme = etapes[0] == etapes[-1]
+
+    def relie(a, b):
+        resultat = plus_court_chemin(adjacence, aretes, coords, a, b,
+                                     penalites=penalises, couloirs=couloirs)
+        return None if resultat is None else resultat[1]
+
     trajet_total = efface_boucles(trajet_brut, aretes, coords, etapes[0], ferme,
-                                  cible_m)
+                                  cible_m, relie=relie)
     if not trajet_total:
         return None
 
@@ -1043,13 +1159,30 @@ def _assemble(adjacence, aretes, coords, etapes, couloirs, cible_m):
 
 def construit_boucle(adjacence, aretes, coords, index_spatial, depart,
                      lat, lon, rayon, cap, sommets, couloirs=None,
-                     cible_m=None):
-    """Boucle passant par `sommets` ancres reparties en couronne autour du
-    depart. Chaque troncon evite les aretes deja utilisees."""
+                     cible_m=None, excentre=False):
+    """Boucle passant par les sommets d'un polygone regulier de `sommets`
+    cotes. Chaque troncon evite les aretes deja utilisees.
+
+    Deux facons de le poser. Centre sur le depart, il l'entoure : la boucle
+    part vers une ancre, fait le tour et revient au centre — deux rayons qui,
+    quand le reseau ne laisse qu'un couloir pour quitter le depart, se longent
+    et dessinent un huit. Excentre, le depart est l'un de ses sommets et le
+    cercle s'ouvre dans la direction du cap : la boucle part d'un cote et
+    revient par l'autre, sans repasser par le milieu. Les deux formes sont
+    essayees, chacune reussit la ou l'autre echoue : au bord de la mer, un
+    polygone centre a la moitie de ses ancres dans l'eau.
+    """
+    centre_lat, centre_lon, debut, premier = lat, lon, cap, 0
+    if excentre:
+        centre_lat, centre_lon = point_a_distance(lat, lon, cap, rayon)
+        # Vu du centre, le depart est a l'oppose du cap : c'est le sommet zero.
+        debut = cap + 180.0
+        premier = 1
     ancres = []
-    for i in range(sommets):
-        angle = (cap + i * 360.0 / sommets) % 360.0
-        cible_lat, cible_lon = point_a_distance(lat, lon, angle, rayon)
+    for i in range(premier, sommets):
+        angle = (debut + i * 360.0 / sommets) % 360.0
+        cible_lat, cible_lon = point_a_distance(centre_lat, centre_lon, angle,
+                                                rayon)
         noeud, ecart = index_spatial.plus_proche(cible_lat, cible_lon,
                                                  rayon_max=max(400.0, rayon * 0.45))
         if noeud is None or noeud == depart or noeud in ancres:
@@ -1138,6 +1271,7 @@ def cherche_trajet(adjacence, aretes, coords, index_spatial, depart, arrivee,
     reste = max(0.0, (cible_m / 2.0) ** 2 - (corde / 2.0) ** 2)
     bas, haut = 0.0, math.sqrt(reste) * 1.7 + 300.0
     meilleur = None
+    vise = cible_m * (1 + tolerance / 2)
 
     for _ in range(iterations):
         hauteur = (bas + haut) / 2.0
@@ -1158,7 +1292,7 @@ def cherche_trajet(adjacence, aretes, coords, index_spatial, depart, arrivee,
             variantes.append(essai_note)
         if meilleur is None or note < meilleur[0]:
             meilleur = essai_note
-        if longueur < cible_m:
+        if longueur < vise:
             bas = hauteur
         else:
             haut = hauteur
@@ -1191,6 +1325,31 @@ def affine_trajet(adjacence, aretes, coords, index_spatial, depart, arrivee,
     return meilleur
 
 
+# Un metre de moins pese comme dix de trop. Le coureur l'a dit ainsi : il
+# prefere cinq cents metres de plus a cinquante de moins. Une boucle un peu
+# longue se court sans y penser ; une boucle trop courte se rattrape en
+# tournant autour du pate de maisons a l'arrivee.
+#
+# La regle vaut pour les petits ecarts, ceux qu'elle compare. Etendue sans
+# fin, elle preferait neuf kilometres sept a quatre et demi pour cinq
+# demandes : au-dela du premier demi-pour-cent, le manque ne compte plus que
+# trois fois.
+POIDS_MANQUE = 10
+MANQUE_TOLERE = 0.005
+POIDS_MANQUE_AU_DELA = 3
+
+
+def ecart_distance(longueur, cible_m):
+    """Ecart a la distance visee, en part de celle-ci, le manque pesant plus
+    lourd."""
+    ecart = (longueur - cible_m) / cible_m
+    if ecart >= 0:
+        return ecart
+    manque = -ecart
+    return (POIDS_MANQUE * min(manque, MANQUE_TOLERE)
+            + POIDS_MANQUE_AU_DELA * max(0.0, manque - MANQUE_TOLERE))
+
+
 def note_boucle(longueur, repetee, cible_m, tolerance, virages=0.0):
     """Classement des boucles candidates, du meilleur au moins bon.
 
@@ -1199,8 +1358,11 @@ def note_boucle(longueur, repetee, cible_m, tolerance, virages=0.0):
       1. la boucle se repete le moins possible (pas de demi-tour) ;
       2. elle colle au plus pres de la distance demandee ;
       3. a egalite, celle qui zigzague le moins l'emporte.
+
+    La tolerance se lit sur l'ecart pondere : 5 % admet un demi-kilometre de
+    plus sur dix, mais pas plus de cinquante metres de moins.
     """
-    erreur = abs(longueur - cible_m) / cible_m
+    erreur = ecart_distance(longueur, cible_m)
     part = repetee / longueur if longueur else 1.0
     if erreur <= tolerance:
         return (0, round(part * 200), round(erreur * 200), virages)
@@ -1209,31 +1371,35 @@ def note_boucle(longueur, repetee, cible_m, tolerance, virages=0.0):
 
 def cherche_boucle(adjacence, aretes, coords, index_spatial, depart, lat, lon,
                    cible_m, cap, sommets, iterations, tolerance,
-                   variantes=None, couloirs=None):
+                   variantes=None, couloirs=None, excentre=False):
     """Dichotomie sur le rayon de la couronne d'ancres : la distance cible est
     atteinte en elargissant la boucle, jamais en la faisant zigzaguer."""
     rayon_ideal = cible_m / (2 * sommets * math.sin(math.pi / sommets))
     bas, haut = rayon_ideal * 0.25, rayon_ideal * 1.60
     meilleur = None
+    # La dichotomie vise le milieu de la fenetre admise, pas son bord : viser
+    # la cible pile, c'etait rendre une fois sur deux une boucle trop courte.
+    vise = cible_m * (1 + tolerance / 2)
 
     for _ in range(iterations):
         rayon = (bas + haut) / 2.0
         essai = construit_boucle(adjacence, aretes, coords, index_spatial,
                                  depart, lat, lon, rayon, cap, sommets,
-                                 couloirs, cible_m)
+                                 couloirs, cible_m, excentre)
         if essai is None:
             haut = rayon
             continue
         longueur, repetee, trajet = essai
         note = note_boucle(longueur, repetee, cible_m, tolerance,
                            virages_serres(trajet, aretes, coords, longueur))
-        essai_note = (note, longueur, repetee, trajet, sommets, cap, rayon)
+        essai_note = (note, longueur, repetee, trajet, sommets, cap, rayon,
+                      excentre)
         # Meme reserve que pour un parcours d'un point a un autre.
         if variantes is not None:
             variantes.append(essai_note)
         if meilleur is None or note < meilleur[0]:
             meilleur = essai_note
-        if longueur < cible_m:
+        if longueur < vise:
             bas = rayon
         else:
             haut = rayon
@@ -1252,7 +1418,7 @@ def affine_boucle(adjacence, aretes, coords, index_spatial, depart, lat, lon,
     ce qui coute quelques dizaines de calculs et gagne reguliserement une
     centaine de metres sur la distance visee.
     """
-    _, _, _, _, sommets, cap, rayon = meilleur
+    _, _, _, _, sommets, cap, rayon, excentre = meilleur
     for decalage in (-9.0, -6.0, -3.0, 3.0, 6.0, 9.0, 0.0):
         for facteur in (0.88, 0.92, 0.96, 1.0, 1.04, 1.08, 1.12):
             if decalage == 0.0 and facteur == 1.0:
@@ -1260,7 +1426,7 @@ def affine_boucle(adjacence, aretes, coords, index_spatial, depart, lat, lon,
             essai = construit_boucle(adjacence, aretes, coords, index_spatial,
                                      depart, lat, lon, rayon * facteur,
                                      (cap + decalage) % 360.0, sommets,
-                                     couloirs, cible_m)
+                                     couloirs, cible_m, excentre)
             if essai is None:
                 continue
             longueur, repetee, trajet = essai
@@ -1269,7 +1435,7 @@ def affine_boucle(adjacence, aretes, coords, index_spatial, depart, lat, lon,
             note = note_boucle(longueur, repetee, cible_m, tolerance,
                                virages_serres(trajet, aretes, coords, longueur))
             essai_note = (note, longueur, repetee, trajet, sommets,
-                          (cap + decalage) % 360.0, rayon * facteur)
+                          (cap + decalage) % 360.0, rayon * facteur, excentre)
             if variantes is not None:
                 variantes.append(essai_note)
             if note < meilleur[0]:
@@ -1287,7 +1453,34 @@ def affine_boucle(adjacence, aretes, coords, index_spatial, depart, lat, lon,
 # aucune arete deux fois. A l'ecran, ces deux defauts sautent pourtant aux
 # yeux. On les mesure donc sur la geometrie finale, sans rien supposer de leur
 # cause.
-MARGE_REPLI = 0.20          # ce qu'un repli a le droit de couter en distance
+# Jusqu'ou un repli anti-doublement peut s'ecarter de la distance demandee,
+# en ecart pondere : la tolerance elle-meme, soit 5 % de plus ou 0,5 % de
+# moins. La distance est la seule chose que le coureur ait demandee ; une
+# petite boucle se voit sur la carte et s'annonce, dix pour cent de moins ne
+# se rattrapent qu'en tournant autour du pate de maisons a l'arrivee. Une
+# marge d'un cinquieme rendait neuf kilometres pour dix des que le meilleur
+# trace avait un defaut.
+MARGE_REPLI = 0.05
+
+# Repetition admise en dernier recours, quand aucun candidat ne tient la
+# distance sous le plafond ordinaire. Un depart pose sur une petite boucle que
+# le reste du reseau ne rejoint que par un seul passage ne peut pas s'en
+# eloigner sans repasser par la : refuser toute repetition le condamnait au
+# tour de son pate de maisons, 1,6 km pour 8 demandes.
+REPETITION_RECOURS = 0.25
+
+# Quand une seule boucle ne peut vraiment pas tenir la distance — elle en
+# manque plus d'un vingtieme ou la depasse d'un cinquieme —, une boucle plus
+# courte a faire plusieurs fois vaut mieux qu'un parcours faux : quatorze
+# kilometres, c'est deux fois une boucle de sept. Pas avant : refaire la meme
+# boucle est un pis-aller, pas une facon de gagner en precision.
+MANQUE_TOURS = 0.05
+SURPLUS_TOURS = 0.20
+# Au-dela de quatre tours, ou sous deux kilometres, ce n'est plus une boucle a
+# refaire, c'est un tour de pate de maisons : mieux vaut alors le meilleur
+# parcours unique, et l'annoncer tel qu'il est.
+TOURS_MAX = 4
+BOUCLE_MIN = 2000.0
 
 # Combien de candidats le controle geometrique examine, du meilleur au moins
 # bon. Les traces sans defaut ne sont pas forcement les mieux classes sur la
@@ -1500,29 +1693,74 @@ def choisit_trace_propre(meilleur, reserve, cible, seuils, points_de, maximum):
     aucun detour — finirait par etre retenu. Mieux vaut un parcours qui longe
     cent metres de lui-meme, et le dire, qu'un parcours dix fois trop court.
 
-    Ordre de preference : d'abord un trace sans rien a redire, sinon un trace
-    qui ne longe pas une portion de lui-meme, sinon le meilleur tel quel.
+    Ordre de preference : d'abord un trace sans rien a redire, sinon celui
+    dont les defauts sont les plus courts — portions longees et petites
+    boucles comptees ensemble. Preferer d'office un trace sans portion longee
+    retenait un parcours qui gardait 1,8 km de crochets plutot qu'un voisin
+    qui longeait 400 m.
     """
     def erreur_de(candidat):
-        return abs(candidat[1] - cible) / cible
+        return ecart_distance(candidat[1], cible)
 
-    erreur_max = erreur_de(meilleur) + MARGE_REPLI
+    # Le repli reste dans la marge, ou a l'ecart qu'avait deja le meilleur :
+    # sur un reseau qui sature, manquer la distance est acceptable, s'en
+    # eloigner davantage pour un dessin plus net ne l'est pas. L'ecart ne
+    # s'additionne pas : un meilleur deja a vingt pour cent ne donne pas droit
+    # a quarante.
+    erreur_max = max(erreur_de(meilleur), MARGE_REPLI)
     candidats = [meilleur] + [c for c in reserve
                               if c is not meilleur and erreur_de(c) <= erreur_max]
     candidats = candidats[:maximum]
 
-    mesures, sans_doublement = [], None
+    moins_pire, defaut_min = None, float("inf")
     for candidat in candidats:
         points = points_de(candidat)
         mesure = (candidat, mesure_doublement(points), mesure_bouclettes(points))
-        mesures.append(mesure)
-        if mesure[1]["longueur"] > seuils["doublement"]:
-            continue
-        if mesure[2]["longueur"] <= seuils["bouclettes"]:
+        if (mesure[1]["longueur"] <= seuils["doublement"]
+                and mesure[2]["longueur"] <= seuils["bouclettes"]):
             return mesure
-        if sans_doublement is None:
-            sans_doublement = mesure
-    return sans_doublement if sans_doublement is not None else mesures[0]
+        defaut = mesure[1]["longueur"] + mesure[2]["longueur"]
+        if defaut < defaut_min:
+            moins_pire, defaut_min = mesure, defaut
+    return moins_pire
+
+
+def recours_repetition(meilleur, variantes, cible, repetition_max, journal,
+                       quoi):
+    """Releve le plafond de repetition quand, dessous, rien ne tient la
+    distance.
+
+    Le candidat de recours doit alors meriter sa place : un metre couru deux
+    fois compte comme un metre manquant, et il ne l'emporte que si la somme
+    des deux est plus faible. Huit kilometres dont un cinquieme repete valent
+    mieux qu'un tour de pate de maisons ; sept kilometres et demi sans rien
+    repeter valent mieux que huit dont un quart en aller-retour.
+
+    Renvoie (meilleur, plafond) : le plafond retenu vaut ensuite pour
+    l'affinage et pour la reserve du controle geometrique.
+    """
+    if meilleur is not None and meilleur[0][0] == 0:
+        return meilleur, repetition_max
+
+    def part(c):
+        return c[2] / c[1] if c[1] else 1.0
+
+    def cout(c):
+        return ecart_distance(c[1], cible) + part(c)
+
+    recours = None
+    for c in variantes:
+        if part(c) <= repetition_max or part(c) > REPETITION_RECOURS:
+            continue
+        if recours is None or cout(c) < cout(recours):
+            recours = c
+    if recours is None or (meilleur is not None
+                           and cout(recours) >= cout(meilleur)):
+        return meilleur, repetition_max
+    journal("  aucun {} a cette distance sans repasser par les memes voies : "
+            "jusqu'a {:.0f} % de repetition admis"
+            .format(quoi, REPETITION_RECOURS * 100))
+    return recours, REPETITION_RECOURS
 
 
 def annonce_defauts(journal, quoi, remplace, doublement, bouclettes, seuils):
@@ -1798,10 +2036,14 @@ def nom_horodate(km):
     return "{}_{:.1f}km.gpx".format(time.strftime("%Y-%m-%d_%Hh%M"), km)
 
 
-def nom_trace(km, boucle=True):
-    """Nom affiche dans la montre : la distance et la date de creation."""
-    return "{} {:.1f} km du {}".format("Boucle" if boucle else "Parcours",
-                                       km, time.strftime("%d/%m/%Y"))
+def nom_trace(km, boucle=True, tours=1):
+    """Nom affiche dans la montre : la distance et la date de creation.
+
+    `tours` > 1 : le fichier ne contient qu'un tour, `km` est sa longueur.
+    """
+    return "{} {:.1f} km{} du {}".format("Boucle" if boucle else "Parcours",
+                                         km, " x{}".format(tours) if tours > 1
+                                         else "", time.strftime("%d/%m/%Y"))
 
 
 def chemin_disponible(chemin):
@@ -1835,7 +2077,8 @@ def trace_vers_arrivee(coeur, aretes, coords, index_coeur, depart,
                        amorce_arrivee, longueur_amorce, longueur_amorce_arrivee,
                        iterations, tolerance, repetition_max, max_points,
                        ecart_depart, journal, couloirs=None,
-                       deplace_depart=0.0, deplace_arrivee=0.0):
+                       deplace_depart=0.0, deplace_arrivee=0.0,
+                       indice_danger=""):
     """Cherche un parcours du depart vers une arrivee distincte.
 
     Meme principe que pour une boucle : la distance demandee s'obtient en
@@ -1851,7 +2094,8 @@ def trace_vers_arrivee(coeur, aretes, coords, index_coeur, depart,
                                couloirs=couloirs)
     if direct is None:
         raise BoucleIntrouvable(
-            "Aucun itineraire praticable ne relie le depart a l'arrivee.")
+            "Aucun itineraire praticable ne relie le depart a l'arrivee."
+            + indice_danger)
     minimum = longueur_trajet(direct[1], aretes)
     total_minimum = minimum + longueur_amorce + longueur_amorce_arrivee
     if budget < minimum * 0.98:
@@ -1888,15 +2132,18 @@ def trace_vers_arrivee(coeur, aretes, coords, index_coeur, depart,
                 meilleur = essai
         journal(ligne)
 
+    meilleur, plafond = recours_repetition(meilleur, variantes, budget,
+                                           repetition_max, journal, "parcours")
     if meilleur is None:
         raise BoucleIntrouvable(
             "Aucun parcours sans aller-retour trouve pour cette distance "
-            "entre ces deux points. Essayer une distance differente.")
+            "entre ces deux points. Essayer une distance differente."
+            + indice_danger)
 
     precedent = meilleur
     meilleur = affine_trajet(coeur, aretes, coords, index_coeur, depart,
                              noeud_arrivee, depart_ll, arrivee_ll, budget,
-                             tolerance, repetition_max, meilleur, variantes,
+                             tolerance, plafond, meilleur, variantes,
                              couloirs)
     if meilleur is not precedent:
         journal("  affinage : {:.2f} km -> {:.2f} km, repetition {:.0f} -> "
@@ -1919,7 +2166,7 @@ def trace_vers_arrivee(coeur, aretes, coords, index_coeur, depart,
                       max_points)
 
     reserve = [c for c in variantes
-               if not (c[1] and c[2] / c[1] > repetition_max)]
+               if not (c[1] and c[2] / c[1] > plafond)]
     reserve.sort(key=lambda c: c[0])
     choisi, doublement, bouclettes = choisit_trace_propre(
         meilleur, reserve, budget, seuils, points_de, CANDIDATS_EXAMINES)
@@ -1961,6 +2208,7 @@ def trace_vers_arrivee(coeur, aretes, coords, index_coeur, depart,
         "qualites": repartition(trajet, aretes, 6),
         "longueur_boucle": longueur,
         "boucle": False,
+        "tours": 1,
         # De combien les points poses ont du etre deplaces pour toucher une
         # rue : l'interface s'en sert pour replacer le marqueur.
         "deplace_depart": deplace_depart,
@@ -1973,8 +2221,9 @@ def trace_vers_arrivee(coeur, aretes, coords, index_coeur, depart,
 
 
 def genere(lat, lon, cible_m, niveau="normal", caps=16, sommets=(3, 4, 5, 6),
-           iterations=10, tolerance=0.03, repetition_max=0.12, max_points=3000,
-           rafraichir=False, journal=print, arrivee=None):
+           iterations=10, tolerance=0.05, repetition_max=0.12, max_points=3000,
+           rafraichir=False, journal=print, arrivee=None,
+           excentres=(False, True)):
     """Calcule la boucle et renvoie un dictionnaire decrivant le resultat.
 
     `arrivee` vaut None pour une boucle (retour au depart) ou (lat, lon) pour
@@ -2049,10 +2298,24 @@ def genere(lat, lon, cible_m, niveau="normal", caps=16, sommets=(3, 4, 5, 6),
     journal("  {} voies sur {} retenues comme praticables ({} ecartees comme "
             "impraticables ou interdites)"
             .format(retenues, len(voies), len(voies) - retenues))
+    # Les routes ecartees pour le danger sont dites a part : quand elles seules
+    # reliaient le depart au reste, le refus doit dire pourquoi, et comment le
+    # lever en connaissance de cause.
+    indice_danger = ""
+    if niveau != "tolerant":
+        dangereuses = sum(1 for v in voies
+                          if exposition_route(v.get("tags") or {}) == "danger")
+        if dangereuses:
+            journal("  dont {} routes sans trottoir a 70 km/h ou plus, trop "
+                    "dangereuses a pied".format(dangereuses))
+            indice_danger = (" Les routes sans trottoir a 70 km/h ou plus sont "
+                             "ecartees par securite ; le niveau tolerant les "
+                             "accepte, a ne choisir qu'en les connaissant.")
     if len(brut) < 50:
         raise BoucleIntrouvable(
             "Trop peu de voies praticables autour de ce point. Essayer le "
-            "niveau tolerant, ou un depart plus proche d'une zone habitee.")
+            "niveau tolerant, ou un depart plus proche d'une zone habitee."
+            + indice_danger)
 
     index_complet = IndexSpatial(coords, brut.keys())
     depart_brut, ecart_depart = index_complet.plus_proche(lat, lon)
@@ -2105,28 +2368,32 @@ def genere(lat, lon, cible_m, niveau="normal", caps=16, sommets=(3, 4, 5, 6),
             return brut, [], 0.0, ecart, 0.0
 
         # 2. Sur une voie sans issue qui y mene : on la remonte, et cette
-        #    amorce est le seul aller-retour inevitable.
+        #    amorce est le seul aller-retour inevitable — tant qu'elle reste
+        #    courte.
         noeud, trajet = rejoint_coeur(adjacence, aretes, brut, utiles)
+        raison = "n'est relie a aucune rue praticable"
         if noeud is not None:
             longueur = longueur_trajet(trajet, aretes)
-            journal("  amorce depuis l'impasse {} : {:.0f} m (seul "
-                    "aller-retour inevitable)".format(quoi, longueur))
-            return noeud, trajet, longueur, ecart, 0.0
+            if longueur <= cible_m * PART_AMORCE:
+                journal("  amorce depuis l'impasse {} : {:.0f} m (seul "
+                        "aller-retour inevitable)".format(quoi, longueur))
+                return noeud, trajet, longueur, ecart, 0.0
+            raison = ("ne rejoint le reseau qu'au bout de {:.0f} m d'impasse"
+                      .format(longueur))
 
-        # 3. Sur un ilot sans issue : aucune rue praticable n'y mene. On prend
-        #    la voie reliee au reste la plus proche, et le resultat dit de
+        # 3. Sur un ilot sans issue, ou au bout d'une impasse trop longue : on
+        #    prend la voie reliee au reste la plus proche, et le resultat dit de
         #    combien le point a ete deplace — laisser croire que le parcours
         #    part de l'endroit pose serait pire que de le deplacer.
         secours, distance = index_utile.plus_proche(point[0], point[1],
                                                     rayon_max=PORTEE_SECOURS)
         if secours is None:
             raise BoucleIntrouvable(
-                "Le point {} n'est relie a aucune rue praticable, et aucune "
-                "voie reliee au reste ne se trouve a moins d'un kilometre et "
-                "demi. Poser le point plus pres d'une rue ou d'un chemin."
-                .format(quoi))
-        journal("  point {} deplace de {:.0f} m : l'endroit pose n'est relie a "
-                "aucune rue praticable".format(quoi, distance))
+                "Le point {} {}, et aucune voie reliee au reste ne se trouve a "
+                "moins d'un kilometre et demi. Poser le point plus pres d'une "
+                "rue ou d'un chemin.".format(quoi, raison) + indice_danger)
+        journal("  point {} deplace de {:.0f} m : l'endroit pose {}"
+                .format(quoi, distance, raison))
         return secours, [], 0.0, distance, distance
 
     depart, amorce, longueur_amorce, ecart_depart, deplace_depart = accroche(
@@ -2150,7 +2417,8 @@ def genere(lat, lon, cible_m, niveau="normal", caps=16, sommets=(3, 4, 5, 6),
     if arrivee is not None and noeud_arrivee not in coeur:
         raise BoucleIntrouvable(
             "Aucun itineraire praticable ne relie le depart a l'arrivee. "
-            "Verifier les deux points, ou assouplir le niveau d'exigence.")
+            "Verifier les deux points, ou assouplir le niveau d'exigence."
+            + indice_danger)
     index_coeur = IndexSpatial(coords, coeur.keys())
 
     # 4. recherche ----------------------------------------------------------
@@ -2160,46 +2428,96 @@ def genere(lat, lon, cible_m, niveau="normal", caps=16, sommets=(3, 4, 5, 6),
             (lat, lon), arrivee, cible_m, amorce, amorce_arrivee,
             longueur_amorce, longueur_amorce_arrivee, iterations, tolerance,
             repetition_max, max_points, ecart_depart, journal, couloirs,
-            deplace_depart, deplace_arrivee)
+            deplace_depart, deplace_arrivee, indice_danger)
 
     budget = max(cible_m - 2 * longueur_amorce, cible_m * 0.3)
-    journal("4/5 Recherche de la boucle ({} orientations x {} formes)"
-            .format(caps, len(sommets)))
-    meilleur = None
-    # Meme reserve que pour un parcours d'un point a un autre.
-    variantes = []
-    testees = 0
-    for index_cap in range(caps):
-        cap = index_cap * 360.0 / caps
-        ligne = "  cap {:3.0f} deg :".format(cap)
-        for nb_sommets in sommets:
-            testees += 1
-            essai = cherche_boucle(coeur, aretes, coords, index_coeur, depart,
-                                   lat, lon, budget, cap, nb_sommets,
-                                   iterations, tolerance, variantes, couloirs)
-            if essai is None:
-                ligne += "  {}s: -".format(nb_sommets)
-                continue
-            note, longueur, repetee, trajet = essai[:4]
-            part = repetee / longueur if longueur else 1.0
-            ligne += "  {}s: {:.2f}km/{:.0f}%".format(
-                nb_sommets, (longueur + 2 * longueur_amorce) / 1000.0, part * 100)
-            if part > repetition_max:
-                continue        # trop d'aller-retours : ecarte d'office
-            if meilleur is None or note < meilleur[0]:
-                meilleur = essai
-        journal(ligne)
+    # Le polygone se pose sur le depart reel, pas sur le point clique : quand
+    # celui-ci a du etre deplace, ou rejoint le reseau par une impasse, une
+    # forme dont le depart est un sommet partirait sinon d'un endroit ou le
+    # parcours ne passe pas.
+    lat_depart, lon_depart = coords[depart]
 
+    def recherche(cible, en_tete):
+        """Une recherche complete : toutes les orientations, toutes les
+        formes. Renvoie le meilleur candidat sous le plafond de repetition, et
+        toutes les tentatives en reserve."""
+        journal(en_tete)
+        meilleur = None
+        # Meme reserve que pour un parcours d'un point a un autre.
+        variantes = []
+        for index_cap in range(caps):
+            cap = index_cap * 360.0 / caps
+            ligne = "  cap {:3.0f} deg :".format(cap)
+            for excentre in excentres:
+                for nb_sommets in sommets:
+                    # "4s" : carre centre sur le depart ; "4e" : carre dont le
+                    # depart est un sommet.
+                    forme = "{}{}".format(nb_sommets, "e" if excentre else "s")
+                    essai = cherche_boucle(coeur, aretes, coords, index_coeur,
+                                           depart, lat_depart, lon_depart, cible,
+                                           cap, nb_sommets, iterations,
+                                           tolerance, variantes, couloirs,
+                                           excentre)
+                    if essai is None:
+                        ligne += "  {}: -".format(forme)
+                        continue
+                    note, longueur, repetee, trajet = essai[:4]
+                    part = repetee / longueur if longueur else 1.0
+                    ligne += "  {}: {:.2f}km/{:.0f}%".format(
+                        forme, (longueur + 2 * longueur_amorce) / 1000.0,
+                        part * 100)
+                    if part > repetition_max:
+                        continue    # trop d'aller-retours : ecarte d'office
+                    if meilleur is None or note < meilleur[0]:
+                        meilleur = essai
+            journal(ligne)
+        return meilleur, variantes
+
+    meilleur, variantes = recherche(
+        budget, "4/5 Recherche de la boucle ({} orientations x {} formes)"
+        .format(caps, len(sommets) * len(excentres)))
+
+    # Incapacite reelle : la meilleure boucle manque nettement la distance. On
+    # cherche alors un parcours deux, trois... fois plus court, a refaire
+    # autant de fois, et on garde le premier qui tient la tolerance. Un tour,
+    # c'est le fichier entier, amorce comprise : "fais-le deux fois" doit
+    # donner la distance annoncee.
+    tours, cible_boucle = 1, budget
+
+    def incapable(c):
+        return (c is None or c[1] < budget * (1 - MANQUE_TOURS)
+                or c[1] > budget * (1 + SURPLUS_TOURS))
+
+    if incapable(meilleur) and cible_m / 2 >= BOUCLE_MIN:
+        journal("  aucune boucle unique ne tient {:.2f} km sans aller-retour"
+                .format(cible_m / 1000.0))
+        n = 2
+        while n <= TOURS_MAX and cible_m / n >= BOUCLE_MIN:
+            cible_tour = cible_m / n - 2 * longueur_amorce
+            # L'amorce ne doit pas devenir l'essentiel de chaque tour.
+            if cible_tour < cible_m / n / 2:
+                break
+            un_tour, reserve_tour = recherche(
+                cible_tour, "  essai d'un parcours de {:.2f} km a faire {} fois"
+                .format(cible_m / n / 1000.0, n))
+            if un_tour is not None and un_tour[0][0] == 0:
+                meilleur, variantes, tours, cible_boucle = (
+                    un_tour, reserve_tour, n, cible_tour)
+                break
+            n += 1
+
+    meilleur, plafond = recours_repetition(meilleur, variantes, cible_boucle,
+                                           repetition_max, journal, "boucle")
     if meilleur is None:
         raise BoucleIntrouvable(
             "Aucune boucle sans aller-retour trouvee pour cette distance. "
             "Essayer une distance un peu differente, un autre depart, ou un "
-            "niveau d'exigence moins severe.")
+            "niveau d'exigence moins severe." + indice_danger)
 
     avant = meilleur
     meilleur = affine_boucle(coeur, aretes, coords, index_coeur, depart,
-                             lat, lon, budget, tolerance, repetition_max,
-                             meilleur, variantes, couloirs)
+                             lat_depart, lon_depart, cible_boucle, tolerance,
+                             plafond, meilleur, variantes, couloirs)
     if meilleur is not avant:
         # L'affinage peut ceder quelques metres sur la distance pour gagner
         # sur la repetition ou les crochets : on dit lequel des trois criteres
@@ -2211,22 +2529,22 @@ def genere(lat, lon, cible_m, niveau="normal", caps=16, sommets=(3, 4, 5, 6),
                         avant[2], meilleur[2], avant[0][3], meilleur[0][3]))
 
     # Meme controle geometrique que pour un parcours d'un point a un autre.
-    seuils = seuils_geometriques(cible_m)
+    seuils = seuils_geometriques(cible_boucle)
 
     def points_de(essai):
         return allege([coords[n] for n in polyligne_du_trajet(essai[3], aretes)],
                       max_points)
 
     reserve = [c for c in variantes
-               if not (c[1] and c[2] / c[1] > repetition_max)]
+               if not (c[1] and c[2] / c[1] > plafond)]
     reserve.sort(key=lambda c: c[0])
     choisi, doublement, bouclettes = choisit_trace_propre(
-        meilleur, reserve, budget, seuils, points_de, CANDIDATS_EXAMINES)
+        meilleur, reserve, cible_boucle, seuils, points_de, CANDIDATS_EXAMINES)
     annonce_defauts(journal, "boucle", choisi is not meilleur,
                     doublement, bouclettes, seuils)
     meilleur = choisi
 
-    _, longueur, repetee, trajet, nb_sommets, cap, _ = meilleur
+    _, longueur, repetee, trajet, nb_sommets, cap, _, _ = meilleur
 
     # 5. assemblage du trace ------------------------------------------------
     noeuds = []
@@ -2242,9 +2560,14 @@ def genere(lat, lon, cible_m, niveau="normal", caps=16, sommets=(3, 4, 5, 6),
         noeuds.extend(retour[1:] if noeuds[-1] == retour[0] else retour)
 
     points = allege([coords[n] for n in noeuds], max_points)
-    distance = longueur + 2 * longueur_amorce
-    journal("5/5 Trace retenu : {:.2f} km, {:.0f} m parcourus deux fois{}"
-            .format(distance / 1000.0, repetee,
+    # Le trace ne contient qu'un tour : c'est lui qu'on suit, et le resultat
+    # dit combien de fois le faire.
+    distance = tours * (longueur + 2 * longueur_amorce)
+    journal("5/5 Trace retenu : {}, {:.0f} m parcourus deux fois{}"
+            .format("parcours de {:.2f} km a faire {} fois, soit {:.2f} km"
+                    .format(distance / tours / 1000.0, tours, distance / 1000.0)
+                    if tours > 1 else "{:.2f} km".format(distance / 1000.0),
+                    repetee,
                     ", {:.0f} m longeant une autre portion".format(
                         doublement["longueur"]) if doublement["longueur"] > 0
                     else ""))
@@ -2263,6 +2586,7 @@ def genere(lat, lon, cible_m, niveau="normal", caps=16, sommets=(3, 4, 5, 6),
         "qualites": repartition(trajet, aretes, 6),
         "longueur_boucle": longueur,
         "boucle": True,
+        "tours": tours,
         # De combien les points poses ont du etre deplaces pour toucher une
         # rue : l'interface s'en sert pour replacer le marqueur.
         "deplace_depart": deplace_depart,
@@ -2501,14 +2825,16 @@ PAGE = r"""<!doctype html>
     <input id="curseur" type="range" min="1" max="80" step="0.5" value="7"
            style="padding:0">
   </div>
-  <p class="aide">Une tolerance de 3 % est admise : entre deux boucles, celle qui
-     ne se repete pas l'emporte sur celle qui tombe pile.</p>
+  <p class="aide">Jamais plus de 0,5 % de moins que demande, au plus 5 % de
+     plus : mieux vaut 500 m de trop que 50 de moins. Si aucune boucle ne peut
+     vraiment tenir la distance, un parcours plus court est propose, a faire
+     plusieurs fois.</p>
 
   <label for="niveau">Exigence de praticabilite</label>
   <select id="niveau">
     <option value="strict">Stricte - bitume et stabilise uniquement</option>
     <option value="normal" selected>Normale - chemins documentes et balises</option>
-    <option value="tolerant">Tolerante - accepte les sentiers non documentes</option>
+    <option value="tolerant">Tolerante - sentiers non documentes, routes sans trottoir</option>
   </select>
 
   <label for="fichier">Nom du fichier GPX</label>
@@ -2843,6 +3169,13 @@ function dessine(r, id) {
   html += "<tr><td>Distance</td><td><b>" + km(r.distance) + "</b> ("
         + (r.distance - r.cible >= 0 ? "+" : "")
         + Math.round(r.distance - r.cible) + " m)</td></tr>";
+  const tours = r.tours || 1;
+  if (tours > 1) {
+    html += "<tr><td>Tours</td><td><b>" + tours + " x " + km(r.distance / tours)
+          + "</b></td></tr></table><p class=\"aide\">Aucune boucle unique ne "
+          + "tient cette distance sans aller-retour ni route dangereuse. Le GPX "
+          + "contient un seul tour : fais-le " + tours + " fois.</p><table>";
+  }
   const propre = r.repetee < 1;
   html += "<tr><td>Aller-retour</td><td class="
         + (propre ? '"bon"' : '""') + ">"
@@ -2897,7 +3230,11 @@ def lance_generation(identifiant, parametres):
             nom_fichier += ".gpx"
         nom_fichier = os.path.basename(nom_fichier)
         chemin = chemin_disponible(os.path.join(SCRIPT_DIR, nom_fichier))
-        nom = nom_trace(parametres["km"], parametres.get("arrivee") is None)
+        tours = resultat.get("tours", 1)
+        if tours > 1:
+            nom = nom_trace(resultat["distance"] / tours / 1000.0, True, tours)
+        else:
+            nom = nom_trace(parametres["km"], parametres.get("arrivee") is None)
         ecrit_gpx(resultat["points"], nom, chemin)
 
         with VERROU:
@@ -2909,6 +3246,7 @@ def lance_generation(identifiant, parametres):
                 "repetee": resultat["repetee"],
                 "accroche": resultat["accroche"],
                 "longueur_boucle": resultat["longueur_boucle"],
+                "tours": tours,
                 "types": [[t, m] for t, m in resultat["types"]],
                 "qualites": [[LIBELLES_QUALITE.get(q, q), m]
                              for q, m in resultat["qualites"]],
@@ -3189,7 +3527,8 @@ def main():
                          default="normal",
                          help="exigence de praticabilite : strict = revetement "
                               "dur uniquement, normal = defaut, tolerant = "
-                              "accepte les sentiers de revetement inconnu")
+                              "accepte les sentiers de revetement inconnu et "
+                              "les routes a 70 km/h ou plus sans trottoir")
     parseur.add_argument("--caps", type=int, default=16,
                          help="nombre d'orientations de depart testees")
     parseur.add_argument("--sommets", type=int, nargs="+", default=(3, 4, 5, 6),
@@ -3198,10 +3537,12 @@ def main():
                          help="etapes de dichotomie par combinaison")
     parseur.add_argument("--repetition-max", type=float, default=0.12,
                          help="part maximale de la boucle parcourue deux fois")
-    parseur.add_argument("--tolerance", type=float, default=0.03,
-                         help="ecart de distance juge acceptable (0.03 = 3 %%) ; "
-                              "en deca, on privilegie la boucle qui se repete "
-                              "le moins plutot que la distance au metre pres")
+    parseur.add_argument("--tolerance", type=float, default=0.05,
+                         help="surplus de distance juge acceptable (0.05 = "
+                              "5 %% de plus ; le manque admis est dix fois "
+                              "moindre) ; en deca, on privilegie la boucle qui "
+                              "se repete le moins plutot que la distance au "
+                              "metre pres")
     parseur.add_argument("--max-points", type=int, default=3000)
     parseur.add_argument("--geojson", action="store_true",
                          help="ecrit aussi un .geojson visualisable sur geojson.io")
@@ -3256,12 +3597,20 @@ def main():
 
     points = resultat["points"]
     longueur = resultat["longueur_boucle"]
+    tours = resultat.get("tours", 1)
+    if tours > 1 and not args.nom:
+        nom = nom_trace(resultat["distance"] / tours / 1000.0, True, tours)
     sortie = chemin_disponible(args.sortie)
     ecrit_gpx(points, nom, sortie)
 
     print("\nResultat")
     print("  Distance   : {:.2f} km ({:+.0f} m par rapport a la cible)"
           .format(resultat["distance"] / 1000.0, resultat["distance"] - cible))
+    if tours > 1:
+        print("  Tours      : aucune boucle unique ne tient cette distance sans "
+              "aller-retour ni route dangereuse. Le GPX contient un seul tour "
+              "de {:.2f} km : a faire {} fois."
+              .format(resultat["distance"] / tours / 1000.0, tours))
     if resultat.get("boucle", True):
         print("  Forme      : {} ancres, orientation {:.0f} deg"
               .format(resultat["sommets"], resultat["cap"]))

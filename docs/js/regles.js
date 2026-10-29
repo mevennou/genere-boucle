@@ -41,6 +41,19 @@ export const BARRIERES_INFRANCHISSABLES = ens(
   "jersey_barrier", "full-height_turnstile", "sally_port", "spikes",
   "hampshire_gate", "guard_rail");
 
+// Routes ouvertes a la circulation, ou le pieton partage la chaussee avec les
+// voitures quand rien ne lui est reserve. Les rues residentielles n'en sont
+// pas : trafic de desserte, vitesse de ville.
+export const ROUTES_PARTAGEES = ens(
+  "unclassified", "tertiary", "tertiary_link", "secondary", "secondary_link",
+  "road");
+// Valeurs qui attestent un espace pieton le long de la chaussee, qu'il soit
+// dessine sur la route elle-meme ou cartographie a part.
+export const COTES_PIETONS = ens("yes", "both", "left", "right", "separate");
+// A partir de cette vitesse, courir sur la chaussee sans trottoir n'est plus
+// un inconfort mais un danger.
+export const VITESSE_DANGEREUSE = 70;
+
 export const LIBELLES_QUALITE = {
   balise: "itineraire balise",
   dure: "revetement dur",
@@ -65,6 +78,48 @@ export function nombre(valeur) {
 }
 
 const vide = (v) => v === undefined || v === null;
+
+/**
+ * Vitesse autorisee en km/h, ou null si les tags ne la disent pas. La limite
+ * peut etre chiffree (« 80 », « 50 mph ») ou implicite (« FR:rural »,
+ * « FR:zone30 ») : c'est ainsi qu'est notee une bonne part des routes
+ * francaises, qui n'ont pas de panneau mais une regle.
+ */
+export function vitesseAutorisee(tags) {
+  for (const cle of ["maxspeed", "maxspeed:type", "zone:maxspeed", "source:maxspeed"]) {
+    const valeur = tags[cle];
+    if (!valeur) continue;
+    let nature = String(valeur).split(":").pop().trim().toLowerCase();
+    if (nature === "rural") return 80.0;
+    if (nature === "urban") return 50.0;
+    if (nature.startsWith("zone")) nature = nature.slice(4);
+    const v = nombre(nature);
+    if (v !== null) return String(valeur).includes("mph") ? v * 1.609 : v;
+  }
+  return null;
+}
+
+/**
+ * Ce que risque un coureur sur une route sans trottoir ni cheminement
+ * reserve : "danger" quand la limite connue est celle d'une route de
+ * campagne, "incertaine" quand rien ne la dit, null sinon.
+ *
+ * Le danger se prouve, il ne se suppose pas. Une limite absente ne vaut pas
+ * quatre-vingts : sur le terrain, ce sont surtout des chemins entre hameaux
+ * ou des rues de bourg que personne n'a renseignes, et les tenir pour des
+ * routes rapides vidait les campagnes de tout parcours. L'eclairage public,
+ * lui, signe la traversee d'une agglomeration : la route est alors une rue.
+ */
+export function expositionRoute(tags) {
+  if (!ROUTES_PARTAGEES.has(tags.highway)) return null;
+  if (tags.foot === "designated") return null;
+  for (const cle of ["sidewalk", "sidewalk:both", "sidewalk:left", "sidewalk:right"]) {
+    if (COTES_PIETONS.has(tags[cle])) return null;
+  }
+  const vitesse = vitesseAutorisee(tags);
+  if (vitesse !== null) return vitesse >= VITESSE_DANGEREUSE ? "danger" : null;
+  return !vide(tags.lit) && tags.lit !== "no" ? null : "incertaine";
+}
 
 /**
  * Renvoie [cout, etiquette, qualite] si la voie est praticable, sinon null.
@@ -94,6 +149,13 @@ export function evalueVoie(tags, niveau, balise = false) {
       && !(pied === "yes" || pied === "designated" || pied === "official")) {
     return null;
   }
+
+  // Une route de campagne sans trottoir n'est pas une penalite a compenser
+  // par une bonne distance : c'est un danger, elle n'entre pas dans le graphe.
+  // Seul le niveau tolerant la garde, tres rencherie, pour ne pas laisser sans
+  // reponse une campagne ou rien d'autre ne relie les chemins.
+  const exposition = expositionRoute(tags);
+  if (exposition === "danger" && niveau !== "tolerant") return null;
 
   // --- obstacles physiques et etat du terrain ----------------------------
   if (!vide(tags.ford) && tags.ford !== "no") return null;
@@ -169,11 +231,15 @@ export function evalueVoie(tags, niveau, balise = false) {
   if (SERVICES_PRIVES.has(service)) cout *= 2.0;
   else if (service === "alley") cout *= 1.3;
 
-  if (hw === "secondary" || hw === "secondary_link"
-      || hw === "tertiary" || hw === "tertiary_link") {
+  if (ROUTES_PARTAGEES.has(hw)) {
     if (tags.sidewalk === "no" || tags.sidewalk === "none") cout *= 1.8;
-    const vitesse = nombre(tags.maxspeed);
-    if (vitesse !== null && vitesse >= 70) cout *= 1.6;
+    const vitesse = vitesseAutorisee(tags);
+    if (vitesse !== null && vitesse >= VITESSE_DANGEREUSE) cout *= 1.6;
+    // Sans limite connue, la route reste un recours : assez chere pour que le
+    // moindre chemin ou trottoir parallele l'emporte, pas au point de couper
+    // les hameaux les uns des autres.
+    if (exposition === "danger") cout *= 3.0;
+    else if (exposition === "incertaine") cout *= 1.5;
   }
 
   if (!naturel && qualite === "inconnue") qualite = "voirie";

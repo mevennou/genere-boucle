@@ -3,7 +3,7 @@
 // fabrique, sans reseau ni Overpass.
 
 import { distanceHaversine } from "./geo.js";
-import { noeudsInfranchissables, LIBELLES_QUALITE } from "./regles.js";
+import { noeudsInfranchissables, expositionRoute, LIBELLES_QUALITE } from "./regles.js";
 import {
   construitGrapheBrut, contracte, supprimeImpasses, composante, restreint,
   construitCSR, IndexSpatial, composantesUtiles,
@@ -11,7 +11,7 @@ import {
 import { Routeur } from "./routage.js";
 import {
   chercheBoucle, affineBoucle, chercheTrajet, affineTrajet,
-  polyligneDuTrajet, viragesSerres, compareNote,
+  polyligneDuTrajet, viragesSerres, compareNote, ecartDistance,
 } from "./boucle.js";
 import { repartition, allege } from "./sortie.js";
 import { detecteCorridors } from "./corridors.js";
@@ -22,12 +22,14 @@ export class BoucleIntrouvable extends Error {}
 
 const km = (m) => (m / 1000).toFixed(2);
 
-// Ce qu'un repli anti-doublement a le droit de couter en distance : un
-// dixieme de la distance demandee, pas davantage. Assez pour preferer un
-// parcours un peu plus court a un parcours qui se longe, trop peu pour que le
-// plus court chemin direct — qui ne double rien par construction — devienne
-// une reponse acceptable a « quinze kilometres ».
-export const MARGE_REPLI = 0.20;
+// Jusqu'ou un repli anti-doublement peut s'ecarter de la distance demandee,
+// en ecart pondere : la tolerance elle-meme, soit 5 % de plus ou 0,5 % de
+// moins. La distance est la seule chose que le coureur ait demandee ; une
+// petite boucle se voit sur la carte et s'annonce, dix pour cent de moins ne
+// se rattrapent qu'en tournant autour du pate de maisons a l'arrivee. Une
+// marge d'un cinquieme rendait neuf kilometres pour dix des que le meilleur
+// trace avait un defaut.
+export const MARGE_REPLI = 0.05;
 
 // En deca, une composante du reseau ne peut pas porter un parcours : ce n'est
 // pas un quartier, c'est un ilot.
@@ -37,6 +39,34 @@ const MIN_NOEUDS_COEUR = 20;
 // aucune. La meme portee que la recherche initiale : au-dela, il n'y a plus
 // rien a proposer.
 const PORTEE_SECOURS = 1500;
+
+// Ce qu'une amorce en impasse peut representer de la distance demandee. Une
+// boucle la court deux fois : au-dela, ce n'est plus l'acces au parcours,
+// c'en est la moitie en aller-retour. Une campagne dont on a retire les
+// routes rapides n'est plus qu'un arbre de chemins, et le premier noeud du
+// reseau maille pouvait s'y trouver a trois kilometres et demi : huit
+// kilometres demandes, trente-six rendus.
+const PART_AMORCE = 0.15;
+
+// Repetition admise en dernier recours, quand aucun candidat ne tient la
+// distance sous le plafond ordinaire. Un depart pose sur une petite boucle
+// que le reste du reseau ne rejoint que par un seul passage ne peut pas
+// s'en eloigner sans repasser par la : refuser toute repetition le
+// condamnait au tour de son pate de maisons, 1,6 km pour 8 demandes.
+const REPETITION_RECOURS = 0.25;
+
+// Quand une seule boucle ne peut vraiment pas tenir la distance — elle en
+// manque plus d'un vingtieme ou la depasse d'un cinquieme —, une boucle plus
+// courte a faire plusieurs fois vaut mieux qu'un parcours faux : quatorze
+// kilometres, c'est deux fois une boucle de sept. Pas avant : refaire la
+// meme boucle est un pis-aller, pas une facon de gagner en precision.
+const MANQUE_TOURS = 0.05;
+const SURPLUS_TOURS = 0.20;
+// Au-dela de quatre tours, ou sous deux kilometres, ce n'est plus une boucle
+// a refaire, c'est un tour de pate de maisons : mieux vaut alors le meilleur
+// parcours unique, et l'annoncer tel qu'il est.
+const TOURS_MAX = 4;
+const BOUCLE_MIN = 2000;
 
 // Combien de candidats le controle geometrique examine, du meilleur au moins
 // bon. Les traces sans defaut ne sont pas forcement les mieux classes sur la
@@ -60,36 +90,67 @@ const POINTS_DE_PASSAGE = [1, 2, 3, 4, 5, 6];
  * court.
  *
  * L'ordre de preference est explicite : d'abord un trace sans rien a redire,
- * sinon un trace qui ne longe pas une portion de lui-meme, sinon le meilleur
- * tel quel — et le defaut restant est alors annonce.
+ * sinon celui dont les defauts sont les plus courts — portions longees et
+ * petites boucles comptees ensemble — et le defaut restant est alors annonce.
+ * Preferer d'office un trace sans portion longee retenait un parcours qui
+ * gardait 1,8 km de crochets plutot qu'un voisin qui longeait 400 m.
  */
 export function choisitTracePropre(meilleur, reserve, cible, seuils,
                                    pointsDe, maximum) {
-  const erreurDe = (candidat) => Math.abs(candidat[1] - cible) / cible;
-  // Le repli part de ce que le meilleur atteignait deja : sur un reseau qui
-  // sature, manquer la distance est acceptable, s'en eloigner encore d'un
-  // dixieme de plus ne l'est pas.
-  const erreurMax = erreurDe(meilleur) + MARGE_REPLI;
+  const erreurDe = (candidat) => ecartDistance(candidat[1], cible);
+  // Le repli reste dans la marge, ou a l'ecart qu'avait deja le meilleur : sur
+  // un reseau qui sature, manquer la distance est acceptable, s'en eloigner
+  // davantage pour un dessin plus net ne l'est pas. L'ecart ne s'additionne
+  // pas : un meilleur deja a vingt pour cent ne donne pas droit a quarante.
+  const erreurMax = Math.max(erreurDe(meilleur), MARGE_REPLI);
   const candidats = [
     meilleur,
     ...reserve.filter((c) => c !== meilleur && erreurDe(c) <= erreurMax),
   ].slice(0, maximum);
 
-  const mesures = [];
-  let sansDoublement = null;
+  let moinsPire = null, defautMin = Infinity;
   for (const candidat of candidats) {
     const points = pointsDe(candidat);
     const mesure = { candidat, doublement: mesureDoublement(points),
                      bouclettes: mesureBouclettes(points) };
-    mesures.push(mesure);
-    if (mesure.doublement.longueur > seuils.doublement) continue;
-    if (mesure.bouclettes.longueur <= seuils.bouclettes) return rendu(mesure);
-    if (sansDoublement === null) sansDoublement = mesure;
+    if (mesure.doublement.longueur <= seuils.doublement
+        && mesure.bouclettes.longueur <= seuils.bouclettes) return rendu(mesure);
+    const defaut = mesure.doublement.longueur + mesure.bouclettes.longueur;
+    if (defaut < defautMin) { moinsPire = mesure; defautMin = defaut; }
   }
-  return rendu(sansDoublement || mesures[0]);
+  return rendu(moinsPire);
 }
 
 const rendu = (m) => [m.candidat, m.doublement, m.bouclettes];
+
+/**
+ * Releve le plafond de repetition quand, dessous, rien ne tient la distance.
+ *
+ * Le candidat de recours doit alors meriter sa place : un metre couru deux
+ * fois compte comme un metre manquant, et il ne l'emporte que si la somme
+ * des deux est plus faible. Huit kilometres dont un cinquieme repete valent
+ * mieux qu'un tour de pate de maisons ; sept kilometres et demi sans rien
+ * repeter valent mieux que huit dont un quart en aller-retour.
+ *
+ * Renvoie [meilleur, plafond] : le plafond retenu vaut ensuite pour
+ * l'affinage et pour la reserve du controle geometrique.
+ */
+function recoursRepetition(meilleur, variantes, cible, repetitionMax, journal, quoi) {
+  if (meilleur !== null && meilleur[0][0] === 0) return [meilleur, repetitionMax];
+  const part = (c) => (c[1] ? c[2] / c[1] : 1.0);
+  const cout = (c) => ecartDistance(c[1], cible) + part(c);
+  let recours = null;
+  for (const c of variantes) {
+    if (part(c) <= repetitionMax || part(c) > REPETITION_RECOURS) continue;
+    if (recours === null || cout(c) < cout(recours)) recours = c;
+  }
+  if (recours === null || (meilleur !== null && cout(recours) >= cout(meilleur))) {
+    return [meilleur, repetitionMax];
+  }
+  journal(`  aucun ${quoi} a cette distance sans repasser par les memes voies : `
+        + `jusqu'a ${(REPETITION_RECOURS * 100).toFixed(0)} % de repetition admis`);
+  return [recours, REPETITION_RECOURS];
+}
 
 /**
  * Ce qu'on accepte de laisser passer sur le dessin final. Une portion longee
@@ -118,7 +179,8 @@ function annonceDefauts(journal, quoi, remplace, doublement, bouclettes, seuils)
 
 export async function genere({
   lat, lon, cibleM, niveau = "normal", caps = 16, sommets = [3, 4, 5, 6],
-  iterations = 10, tolerance = 0.03, repetitionMax = 0.12, maxPoints = 3000,
+  excentres = [false, true],
+  iterations = 10, tolerance = 0.05, repetitionMax = 0.12, maxPoints = 3000,
   arrivee = null, rafraichir = false, journal = () => {}, source,
 }) {
   // 1. reseau OSM ---------------------------------------------------------
@@ -165,10 +227,24 @@ export async function genere({
   const { brut, nbNoeuds, lat: latN, lon: lonN } = G;
   journal(`  ${G.retenues} voies sur ${voies.length} retenues comme praticables `
         + `(${voies.length - G.retenues} ecartees comme impraticables ou interdites)`);
+  // Les routes ecartees pour le danger sont dites a part : quand elles seules
+  // reliaient le depart au reste, le refus doit dire pourquoi, et comment le
+  // lever en connaissance de cause.
+  let indiceDanger = "";
+  if (niveau !== "tolerant") {
+    const dangereuses = voies.filter((v) => expositionRoute(v.tags || {}) === "danger").length;
+    if (dangereuses) {
+      journal(`  dont ${dangereuses} routes sans trottoir a 70 km/h ou plus, `
+            + "trop dangereuses a pied");
+      indiceDanger = " Les routes sans trottoir a 70 km/h ou plus sont ecartees "
+                   + "par securite ; le niveau tolerant les accepte, a ne "
+                   + "choisir qu'en les connaissant.";
+    }
+  }
   if (G.nbAvecAretes < 50) {
     throw new BoucleIntrouvable(
       "Trop peu de voies praticables autour de ce point. Essayer le niveau "
-      + "tolerant, ou un depart plus proche d'une zone habitee.");
+      + "tolerant, ou un depart plus proche d'une zone habitee." + indiceDanger);
   }
 
   const avecAretes = [];
@@ -232,17 +308,21 @@ export async function genere({
     if (utiles.has(brut)) return { noeud: brut, amorce: [], longueur: 0, ecart };
 
     // 2. Sur une voie sans issue qui y mene : on la remonte, et cette amorce
-    //    est le seul aller-retour inevitable.
+    //    est le seul aller-retour inevitable — tant qu'elle reste courte.
     const [noeud, trajet] = routeur.rejointCoeur(adjacence, brut, (n) => utiles.has(n));
+    let raison = "n'est relie a aucune rue praticable";
     if (noeud !== null) {
       const longueur = routeur.longueurTrajet(trajet);
-      journal(`  amorce depuis l'impasse ${quoi} : ${longueur.toFixed(0)} m `
-            + "(seul aller-retour inevitable)");
-      return { noeud, amorce: trajet, longueur, ecart };
+      if (longueur <= cibleM * PART_AMORCE) {
+        journal(`  amorce depuis l'impasse ${quoi} : ${longueur.toFixed(0)} m `
+              + "(seul aller-retour inevitable)");
+        return { noeud, amorce: trajet, longueur, ecart };
+      }
+      raison = `ne rejoint le reseau qu'au bout de ${longueur.toFixed(0)} m d'impasse`;
     }
 
-    // 3. Sur un ilot sans issue : aucune rue praticable n'y mene. On prend la
-    //    voie reliee au reste la plus proche, et le resultat dit ou le
+    // 3. Sur un ilot sans issue, ou au bout d'une impasse trop longue : on
+    //    prend la voie reliee au reste la plus proche, et le resultat dit ou le
     //    parcours commence vraiment — c'est a l'interface de replacer le
     //    marqueur, pour que la carte montre le depart reel plutot que de
     //    laisser croire qu'il est reste ou on l'avait pose.
@@ -250,12 +330,12 @@ export async function genere({
                                                       PORTEE_SECOURS);
     if (secours === null) {
       throw new BoucleIntrouvable(
-        `Le point ${quoi} n'est relie a aucune rue praticable, et aucune voie `
-        + "reliee au reste ne se trouve a moins d'un kilometre et demi. Poser "
-        + "le point plus pres d'une rue ou d'un chemin.");
+        `Le point ${quoi} ${raison}, et aucune voie reliee au reste ne se `
+        + "trouve a moins d'un kilometre et demi. Poser le point plus pres "
+        + "d'une rue ou d'un chemin." + indiceDanger);
     }
     journal(`  point ${quoi} deplace de ${distance.toFixed(0)} m : l'endroit `
-          + "pose n'est relie a aucune rue praticable");
+          + `pose ${raison}`);
     return { noeud: secours, amorce: [], longueur: 0, ecart: distance,
              deplace: distance };
   };
@@ -287,7 +367,7 @@ export async function genere({
   if (arrivee && !coeur[noeudArrivee]) {
     throw new BoucleIntrouvable(
       "Aucun itineraire praticable ne relie le depart a l'arrivee. Verifier les "
-      + "deux points, ou assouplir le niveau d'exigence.");
+      + "deux points, ou assouplir le niveau d'exigence." + indiceDanger);
   }
   const indexCoeur = new IndexSpatial(latN, lonN, atteignables);
   const routeurCoeur = new Routeur(construitCSR(coeur, nbNoeuds), aretes,
@@ -301,48 +381,95 @@ export async function genere({
       departLL: [lat, lon], arriveeLL: arrivee, cibleM, amorce, amorceArrivee,
       longueurAmorce, longueurAmorceArrivee, iterations, tolerance,
       repetitionMax, maxPoints, ecartDepart, journal,
-      deplaceDepart, deplaceArrivee,
+      deplaceDepart, deplaceArrivee, indiceDanger,
     });
   }
 
   const budget = Math.max(cibleM - 2 * longueurAmorce, cibleM * 0.3);
-  journal(`4/5 Recherche de la boucle (${caps} orientations x ${sommets.length} formes)`);
-  let meilleur = null;
-  // Toutes les tentatives valides sont gardees en reserve : si le meilleur
-  // candidat se revele avoir un defaut de trace, on prend le suivant plutot
-  // que de le servir tel quel.
-  const variantes = [];
+  // Le polygone se pose sur le depart reel, pas sur le point clique : quand
+  // celui-ci a du etre deplace, ou rejoint le reseau par une impasse, une
+  // forme dont le depart est un sommet partirait sinon d'un endroit ou le
+  // parcours ne passe pas.
+  const latDepart = latN[depart], lonDepart = lonN[depart];
+  const formes = sommets.length * excentres.length;
 
-  for (let indexCap = 0; indexCap < caps; indexCap++) {
-    const cap = indexCap * 360.0 / caps;
-    let ligne = `  cap ${String(Math.round(cap)).padStart(3)} deg :`;
-    for (const nbSommets of sommets) {
-      const essai = chercheBoucle(routeurCoeur, aretes, latN, lonN, indexCoeur,
-                                  depart, lat, lon, budget, cap, nbSommets,
-                                  iterations, tolerance, variantes);
-      if (essai === null) { ligne += `  ${nbSommets}s: -`; continue; }
-      const [note, longueur, repetee] = essai;
-      const part = longueur ? repetee / longueur : 1.0;
-      ligne += `  ${nbSommets}s: ${km(longueur + 2 * longueurAmorce)}km/`
-             + `${(part * 100).toFixed(0)}%`;
-      if (part > repetitionMax) continue;
-      if (meilleur === null || compareNote(note, meilleur[0]) < 0) meilleur = essai;
+  // Une recherche complete : toutes les orientations, toutes les formes.
+  // Renvoie le meilleur candidat sous le plafond de repetition, et toutes les
+  // tentatives en reserve.
+  const recherche = async (cible, enTete) => {
+    journal(enTete);
+    let meilleur = null;
+    // Toutes les tentatives valides sont gardees en reserve : si le meilleur
+    // candidat se revele avoir un defaut de trace, on prend le suivant plutot
+    // que de le servir tel quel.
+    const variantes = [];
+    for (let indexCap = 0; indexCap < caps; indexCap++) {
+      const cap = indexCap * 360.0 / caps;
+      let ligne = `  cap ${String(Math.round(cap)).padStart(3)} deg :`;
+      for (const excentre of excentres) {
+        for (const nbSommets of sommets) {
+          // « 4s » : carre centre sur le depart ; « 4e » : carre dont le
+          // depart est un sommet.
+          const forme = `${nbSommets}${excentre ? "e" : "s"}`;
+          const essai = chercheBoucle(routeurCoeur, aretes, latN, lonN, indexCoeur,
+                                      depart, latDepart, lonDepart, cible, cap,
+                                      nbSommets, iterations, tolerance, variantes,
+                                      excentre);
+          if (essai === null) { ligne += `  ${forme}: -`; continue; }
+          const [note, longueur, repetee] = essai;
+          const part = longueur ? repetee / longueur : 1.0;
+          ligne += `  ${forme}: ${km(longueur + 2 * longueurAmorce)}km/`
+                 + `${(part * 100).toFixed(0)}%`;
+          if (part > repetitionMax) continue;
+          if (meilleur === null || compareNote(note, meilleur[0]) < 0) meilleur = essai;
+        }
+      }
+      journal(ligne);
+      if (indexCap % 4 === 3) await souffle();
     }
-    journal(ligne);
-    if (indexCap % 4 === 3) await souffle();
+    return [meilleur, variantes];
+  };
+
+  let [meilleur, variantes] = await recherche(
+    budget, `4/5 Recherche de la boucle (${caps} orientations x ${formes} formes)`);
+
+  // Incapacite reelle : la meilleure boucle manque nettement la distance. On
+  // cherche alors un parcours deux, trois... fois plus court, a refaire
+  // autant de fois, et on garde le premier qui tient la tolerance. Un tour,
+  // c'est le fichier entier, amorce comprise : « fais-le deux fois » doit
+  // donner la distance annoncee.
+  let tours = 1, cibleBoucle = budget;
+  const incapable = (c) => c === null || c[1] < budget * (1 - MANQUE_TOURS)
+                        || c[1] > budget * (1 + SURPLUS_TOURS);
+  if (incapable(meilleur) && cibleM / 2 >= BOUCLE_MIN) {
+    journal(`  aucune boucle unique ne tient ${km(cibleM)} km sans aller-retour`);
+    for (let n = 2; n <= TOURS_MAX && cibleM / n >= BOUCLE_MIN; n++) {
+      const cibleTour = cibleM / n - 2 * longueurAmorce;
+      // L'amorce ne doit pas devenir l'essentiel de chaque tour.
+      if (cibleTour < cibleM / n / 2) break;
+      const [unTour, reserveTour] = await recherche(cibleTour,
+        `  essai d'un parcours de ${km(cibleM / n)} km a faire ${n} fois`);
+      if (unTour !== null && unTour[0][0] === 0) {
+        [meilleur, variantes, tours, cibleBoucle] = [unTour, reserveTour, n, cibleTour];
+        break;
+      }
+    }
   }
 
+  let plafond;
+  [meilleur, plafond] = recoursRepetition(meilleur, variantes, cibleBoucle,
+                                          repetitionMax, journal, "boucle");
   if (meilleur === null) {
     throw new BoucleIntrouvable(
       "Aucune boucle sans aller-retour trouvee pour cette distance. Essayer une "
       + "distance un peu differente, un autre depart, ou un niveau d'exigence "
-      + "moins severe.");
+      + "moins severe." + indiceDanger);
   }
 
   const avant = meilleur;
   meilleur = affineBoucle(routeurCoeur, aretes, latN, lonN, indexCoeur, depart,
-                          lat, lon, budget, tolerance, repetitionMax, meilleur,
-                          variantes);
+                          latDepart, lonDepart, cibleBoucle, tolerance, plafond,
+                          meilleur, variantes);
   if (meilleur !== avant) {
     journal(`  affinage : ${km(avant[1] + 2 * longueurAmorce)} km -> `
           + `${km(meilleur[1] + 2 * longueurAmorce)} km, repetition `
@@ -354,19 +481,18 @@ export async function genere({
   // par la rue et un retour par le trottoir d'a cote restent deux aretes
   // distinctes, donc invisibles pour tout comptage base sur les identifiants.
   // Ce controle ne suppose rien de la cause, il regarde le dessin obtenu.
-  const seuils = seuilsGeometriques(cibleM);
+  const seuils = seuilsGeometriques(cibleBoucle);
   const pointsDe = (essai) =>
     allege(polyligneDuTrajet(essai[3], aretes).map((n) => [latN[n], lonN[n]]), maxPoints);
 
-  const reserve = variantes.filter((c) => !(c[1] && c[2] / c[1] > repetitionMax));
+  const reserve = variantes.filter((c) => !(c[1] && c[2] / c[1] > plafond));
   reserve.sort((a, b) => compareNote(a[0], b[0]));
   const [choisi, doublement, bouclettes] = choisitTracePropre(
-    meilleur, reserve, budget, seuils, pointsDe, CANDIDATS_EXAMINES);
+    meilleur, reserve, cibleBoucle, seuils, pointsDe, CANDIDATS_EXAMINES);
   annonceDefauts(journal, "boucle", choisi !== meilleur, doublement, bouclettes, seuils);
   meilleur = choisi;
 
   const [, longueur, repetee, trajet, nbSommets, cap] = meilleur;
-
 
   // 5. assemblage du trace -------------------------------------------------
   let noeuds = [];
@@ -383,8 +509,13 @@ export async function genere({
   }
 
   const points = allege(noeuds.map((n) => [latN[n], lonN[n]]), maxPoints);
-  const distance = longueur + 2 * longueurAmorce;
-  journal(`5/5 Trace retenu : ${km(distance)} km, ${repetee.toFixed(0)} m parcourus deux fois`
+  // Le trace ne contient qu'un tour : c'est lui qu'on suit, et le resultat
+  // dit combien de fois le faire.
+  const distance = tours * (longueur + 2 * longueurAmorce);
+  journal(`5/5 Trace retenu : `
+        + (tours > 1 ? `parcours de ${km(distance / tours)} km a faire ${tours} `
+                       + `fois, soit ${km(distance)} km` : `${km(distance)} km`)
+        + `, ${repetee.toFixed(0)} m parcourus deux fois`
         + (doublement.longueur > 0
            ? `, ${doublement.longueur.toFixed(0)} m longeant une autre portion` : ""));
 
@@ -395,7 +526,7 @@ export async function genere({
     types: repartition(trajet, aretes, "etiquette"),
     qualites: repartition(trajet, aretes, "qualite")
       .map(([q, m]) => [LIBELLES_QUALITE[q] || q, m]),
-    longueurBoucle: longueur, boucle: true,
+    longueurBoucle: longueur, boucle: true, tours,
     // De combien les points poses ont du etre deplaces pour toucher une rue :
     // l'interface s'en sert pour replacer le marqueur, plutot que de laisser
     // croire que le parcours part de la ou on avait clique.
@@ -409,14 +540,15 @@ function traceVersArrivee({
   routeur, aretes, latN, lonN, indexCoeur, depart, noeudArrivee, departLL,
   arriveeLL, cibleM, amorce, amorceArrivee, longueurAmorce,
   longueurAmorceArrivee, iterations, tolerance, repetitionMax, maxPoints,
-  ecartDepart, journal, deplaceDepart = 0, deplaceArrivee = 0,
+  ecartDepart, journal, deplaceDepart = 0, deplaceArrivee = 0, indiceDanger = "",
 }) {
   const budget = cibleM - longueurAmorce - longueurAmorceArrivee;
 
   routeur.nouvellesPenalites();
   const direct = routeur.plusCourtChemin(depart, noeudArrivee);
   if (direct === null) {
-    throw new BoucleIntrouvable("Aucun itineraire praticable ne relie le depart a l'arrivee.");
+    throw new BoucleIntrouvable(
+      "Aucun itineraire praticable ne relie le depart a l'arrivee." + indiceDanger);
   }
   const minimum = routeur.longueurTrajet(direct[1]);
   const totalMinimum = minimum + longueurAmorce + longueurAmorceArrivee;
@@ -446,15 +578,18 @@ function traceVersArrivee({
     journal(ligne);
   }
 
+  let plafond;
+  [meilleur, plafond] = recoursRepetition(meilleur, variantes, budget,
+                                          repetitionMax, journal, "parcours");
   if (meilleur === null) {
     throw new BoucleIntrouvable(
       "Aucun parcours sans aller-retour trouve pour cette distance entre ces "
-      + "deux points. Essayer une distance differente.");
+      + "deux points. Essayer une distance differente." + indiceDanger);
   }
 
   meilleur = affineTrajet(routeur, aretes, latN, lonN, indexCoeur, depart,
                           noeudArrivee, departLL, arriveeLL, budget, tolerance,
-                          repetitionMax, meilleur, variantes);
+                          plafond, meilleur, variantes);
 
   // Meme controle geometrique que pour les boucles : un parcours d'un point a
   // un autre peut tout aussi bien longer une portion de lui-meme, par la rue a
@@ -463,7 +598,7 @@ function traceVersArrivee({
   const pointsDe = (essai) =>
     allege(polyligneDuTrajet(essai[3], aretes).map((n) => [latN[n], lonN[n]]), maxPoints);
 
-  const reserve = variantes.filter((c) => !(c[1] && c[2] / c[1] > repetitionMax));
+  const reserve = variantes.filter((c) => !(c[1] && c[2] / c[1] > plafond));
   reserve.sort((a, b) => compareNote(a[0], b[0]));
   const [choisi, doublement, bouclettes] = choisitTracePropre(
     meilleur, reserve, budget, seuils, pointsDe, CANDIDATS_EXAMINES);
@@ -495,7 +630,7 @@ function traceVersArrivee({
     types: repartition(trajet, aretes, "etiquette"),
     qualites: repartition(trajet, aretes, "qualite")
       .map(([q, m]) => [LIBELLES_QUALITE[q] || q, m]),
-    longueurBoucle: longueur, boucle: false,
+    longueurBoucle: longueur, boucle: false, tours: 1,
     // De combien les points poses ont du etre deplaces pour toucher une rue :
     // l'interface s'en sert pour replacer le marqueur, plutot que de laisser
     // croire que le parcours part de la ou on avait clique.
